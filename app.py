@@ -1,65 +1,34 @@
 """
 app.py — A1PICKS MLB Hit Predictor  V5.0
 ==========================================
-Entry point. Thin as possible — just wires modules together.
-
-Module map:
-  config.py           → all constants, mappings, CONFIG dict
-  data/loader.py      → BallPark Pal CSV loading (current primary source)
-  data/mlb_api.py     → MLB Stats API (player stats, lineups, game logs)
-  data/savant.py      → Baseball Savant / pybaseball (Statcast metrics)
-  scoring/engine.py   → metric computation + all four scores + GC scores
-  ui/styles.py        → CSS injection
-  ui/sidebar.py       → build_filters, apply_filters, get_slate_df
-  ui/renders.py       → all render_* functions (header, table, cards, charts)
-  ui/parlay.py        → parlay builder
-  ui/reference.py     → reference manual page
-  utils/helpers.py    → normalize_0_100, grade_pill, freshness badge, etc.
+Entry point. Wires all modules together.
 """
 
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime
 
-# ── Page config must be first Streamlit call ──────────────────────────────────
 st.set_page_config(
     page_title="A1PICKS MLB Hit Predictor",
     layout="wide",
     page_icon="⚾",
 )
 
-# ── Module imports ─────────────────────────────────────────────────────────────
-from styles   import inject_css
-from sidebar  import build_filters, apply_filters, get_slate_df
-from renders  import (
-    render_header,
-    render_stat_bar,
-    render_score_summary_cards,
-    render_pitcher_landscape,
-    render_park_notice,
-    render_game_conditions_panel,
-    render_results_table,
-    render_best_per_target,
-    render_visualizations,
-)
+from styles    import inject_css
+from sidebar   import (build_filters, apply_filters, get_slate_df,
+                        render_lineup_status_sidebar)
+from renders   import (render_header, render_stat_bar, render_score_summary_cards,
+                        render_pitcher_landscape, render_park_notice,
+                        render_game_conditions_panel, render_results_table,
+                        render_best_per_target, render_visualizations,
+                        render_player_deep_dive)
 from parlay    import parlay_page
 from reference import info_page
 
-from loader  import (
-    load_matchups,
-    load_pitcher_data,
-    load_game_conditions,
-    load_pitcher_qs,
-    merge_pitcher_data,
-    merge_game_conditions,
-)
-from engine import (
-    compute_metrics,
-    compute_scores,
-    compute_game_condition_scores,
-)
+from loader  import (load_matchups, load_pitcher_data, load_game_conditions,
+                      load_pitcher_qs, merge_pitcher_data, merge_game_conditions)
+from engine  import (compute_metrics, compute_scores, compute_game_condition_scores)
 
-# ── Inject CSS ─────────────────────────────────────────────────────────────────
 inject_css()
 
 
@@ -77,7 +46,7 @@ def main_page():
         qs_df      = load_pitcher_qs()
 
     if raw_df is None:
-        st.error("❌ Could not load Matchups data. Check connection or try again.")
+        st.error("❌ Could not load Matchups data.")
         return
 
     filters = build_filters(raw_df)
@@ -87,7 +56,23 @@ def main_page():
     df      = merge_game_conditions(df, game_cond, qs_df)
     df      = compute_game_condition_scores(df, use_gc=filters.get('use_gc', True))
 
-    # When GC toggle ON, upgrade the active score column to its _gc variant
+    # ── Join Statcast season metrics (single batch call) ──────────────────────
+    try:
+        from savant import join_statcast_to_slate
+        df = join_statcast_to_slate(df)
+    except Exception:
+        pass  # graceful — app works without Statcast
+
+    # ── Build player ID map for game log lookups (cached 24h) ─────────────────
+    player_id_map = {}
+    try:
+        from mlb_api import build_player_id_map
+        batter_names  = tuple(sorted(df['Batter'].unique().tolist()))
+        player_id_map = build_player_id_map(batter_names)
+    except Exception:
+        pass
+
+    # ── GC score column upgrade ───────────────────────────────────────────────
     if filters.get('use_gc', False):
         gc_col = filters['score_col'] + '_gc'
         if gc_col in df.columns:
@@ -117,12 +102,15 @@ def main_page():
     display_sc = filters['score_col_base']
     st.markdown(f"""
 <div class="result-head">
-  <span class="rh-label">{target_labels.get(filters['score_col'], target_labels.get(display_sc, 'Hit'))} Candidates</span>
+  <span class="rh-label">
+    {target_labels.get(filters['score_col'], target_labels.get(display_sc,'Hit'))} Candidates
+  </span>
   <span class="rh-count">{len(filtered_df)} results</span>
 </div>
 """, unsafe_allow_html=True)
 
     render_results_table(filtered_df, filters)
+    render_player_deep_dive(filtered_df, player_id_map)   # ← NEW: game log + statcast
     render_best_per_target(slate_df, filters)
 
     if not filtered_df.empty:
@@ -169,7 +157,6 @@ def main():
 
     if page == "⚾ Predictor":
         main_page()
-
     elif page == "⚡ Parlay Builder":
         raw_df = load_matchups()
         if raw_df is not None:
@@ -187,12 +174,14 @@ def main():
             parlay_page(df)
         else:
             st.error("❌ Could not load data for Parlay Builder.")
-
     else:
         info_page()
 
+    # ── Lineup status always visible in sidebar ──────────────────────────────
+    render_lineup_status_sidebar()   # ← NEW: per-game ✅/⏳ with SPs
+
     st.sidebar.markdown("---")
-    st.sidebar.caption("V5.0 · Multi-module · MLB Stats API ready · BallPark Pal + Savant")
+    st.sidebar.caption("V5.0 · BallPark Pal + MLB Stats API + Statcast")
 
 
 if __name__ == "__main__":

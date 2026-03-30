@@ -1,21 +1,14 @@
 """
-data/mlb_api.py — MLB Stats API Integration
-=============================================
-Phase 1: Supplementary data layer alongside BallPark Pal CSVs.
-Provides: player season stats, game logs, pitch arsenal, lineup confirmations.
-
-Uses the MLB Stats API (statsapi.mlb.com) via the mlb-statsapi Python package.
-No auth required — public API.
-
-Phase 2 (future): This file becomes the primary data source when
-BallPark Pal API + SportsScreen API are integrated.
+mlb_api.py — MLB Stats API Integration
+========================================
+Provides: lineup confirmations, player game logs, player ID lookup.
+Uses the mlb-statsapi Python package (free, no auth required).
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import date
 
-# ── Lazy import so app doesn't crash if package not installed yet ──────────────
 try:
     import statsapi
     _STATSAPI_AVAILABLE = True
@@ -23,28 +16,24 @@ except ImportError:
     _STATSAPI_AVAILABLE = False
 
 
-def _check_available():
-    if not _STATSAPI_AVAILABLE:
-        st.warning("⚠️ mlb-statsapi not installed. Run: pip install mlb-statsapi")
-        return False
-    return True
+def _api_ok() -> bool:
+    return _STATSAPI_AVAILABLE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PLAYER LOOKUP
+# PLAYER ID LOOKUP
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600)
-def lookup_player_id(full_name: str) -> int | None:
-    """Resolve a player's full name to their MLBAM player ID."""
-    if not _check_available():
+@st.cache_data(ttl=86400)
+def lookup_player_id(full_name: str):
+    if not _api_ok():
         return None
     try:
-        parts = full_name.strip().split()
-        if len(parts) < 2:
-            return None
-        last, first = parts[-1], parts[0]
         results = statsapi.lookup_player(full_name)
+        if results:
+            return results[0]['id']
+        last = full_name.strip().split()[-1]
+        results = statsapi.lookup_player(last)
         if results:
             return results[0]['id']
     except Exception:
@@ -52,101 +41,68 @@ def lookup_player_id(full_name: str) -> int | None:
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SEASON STATS
-# ─────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=3600)
-def get_player_season_stats(player_id: int, season: int = None) -> dict | None:
-    """
-    Returns a dict of season hitting stats for a given MLBAM player ID.
-    Falls back to current season if season not specified.
-    """
-    if not _check_available():
-        return None
-    if season is None:
-        season = date.today().year
-    try:
-        data = statsapi.player_stat_data(
-            player_id,
-            group='hitting',
-            type='season',
-            sportId=1
-        )
-        if data and 'stats' in data:
-            for stat_group in data['stats']:
-                if stat_group.get('group') == 'hitting':
-                    splits = stat_group.get('splits', [])
-                    if splits:
-                        return splits[0].get('stat', {})
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch season stats for player {player_id}: {e}")
-    return None
+@st.cache_data(ttl=86400)
+def build_player_id_map(batter_names: tuple) -> dict:
+    """Batch-resolve batter names to MLBAM IDs. Cached 24h."""
+    id_map = {}
+    for name in batter_names:
+        pid = lookup_player_id(name)
+        if pid:
+            id_map[name] = pid
+    return id_map
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GAME LOG (recent form)
+# GAME LOG
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=1800)
-def get_player_game_log(player_id: int, last_n: int = 10, season: int = None) -> pd.DataFrame:
-    """
-    Returns a DataFrame of the player's last N games with hitting stats.
-    Columns: date, opponent, AB, H, HR, RBI, BB, K, AVG
-    """
-    if not _check_available():
+def get_player_game_log(player_id: int, last_n: int = 10) -> pd.DataFrame:
+    """Last N games hitting log. Columns: Date, Opp, AB, H, 2B, HR, RBI, BB, K, AVG"""
+    if not _api_ok():
         return pd.DataFrame()
-    if season is None:
-        season = date.today().year
+    season = date.today().year
     try:
-        data = statsapi.get('stats', {
-            'personId':  player_id,
-            'stats':     'gameLog',
-            'group':     'hitting',
-            'season':    season,
-            'sportId':   1,
+        data   = statsapi.get('stats', {
+            'personId': player_id, 'stats': 'gameLog',
+            'group': 'hitting', 'season': season, 'sportId': 1,
         })
         splits = (data.get('stats', [{}])[0]).get('splits', [])
+        if not splits:
+            return pd.DataFrame()
         rows = []
-        for s in splits[-last_n:]:
-            st_data = s.get('stat', {})
+        for s in reversed(splits[-last_n:]):
+            sd = s.get('stat', {})
             rows.append({
-                'Date':     s.get('date', ''),
-                'Opponent': s.get('opponent', {}).get('name', ''),
-                'AB':       st_data.get('atBats', 0),
-                'H':        st_data.get('hits', 0),
-                'HR':       st_data.get('homeRuns', 0),
-                'RBI':      st_data.get('rbi', 0),
-                'BB':       st_data.get('baseOnBalls', 0),
-                'K':        st_data.get('strikeOuts', 0),
-                'AVG':      st_data.get('avg', '.000'),
+                'Date':  s.get('date', ''),
+                'Opp':   s.get('opponent', {}).get('abbreviation', ''),
+                'AB':    int(sd.get('atBats', 0)),
+                'H':     int(sd.get('hits', 0)),
+                '2B':    int(sd.get('doubles', 0)),
+                'HR':    int(sd.get('homeRuns', 0)),
+                'RBI':   int(sd.get('rbi', 0)),
+                'BB':    int(sd.get('baseOnBalls', 0)),
+                'K':     int(sd.get('strikeOuts', 0)),
+                'AVG':   sd.get('avg', '.000'),
             })
         return pd.DataFrame(rows)
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch game log for player {player_id}: {e}")
+    except Exception:
         return pd.DataFrame()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TODAY'S SCHEDULE + LINEUP CONFIRMATIONS
+# TODAY'S SCHEDULE + LINEUP STATUS
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def get_todays_schedule() -> list:
-    """
-    Returns today's MLB schedule with probable pitchers and lineup status.
-    Each item: { game_pk, away_team, home_team, game_time, status,
-                 away_pitcher, home_pitcher, lineups_posted }
-    """
-    if not _check_available():
+    """Returns today's games with lineup posted status and probable pitchers."""
+    if not _api_ok():
         return []
     try:
         today = date.today().strftime('%m/%d/%Y')
-        sched = statsapi.schedule(
-            date=today,
-            sportId=1,
-            hydrate='probablePitcher,lineups,linescore'
-        )
+        sched = statsapi.schedule(date=today, sportId=1,
+                                  hydrate='probablePitcher,lineups')
         games = []
         for g in sched:
             games.append({
@@ -155,52 +111,50 @@ def get_todays_schedule() -> list:
                 'home_team':      g.get('home_name', ''),
                 'game_time':      g.get('game_datetime', ''),
                 'status':         g.get('status', ''),
-                'away_pitcher':   g.get('away_probable_pitcher', ''),
-                'home_pitcher':   g.get('home_probable_pitcher', ''),
+                'away_pitcher':   g.get('away_probable_pitcher', 'TBD'),
+                'home_pitcher':   g.get('home_probable_pitcher', 'TBD'),
                 'lineups_posted': bool(g.get('lineups')),
             })
         return games
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch today's schedule: {e}")
+    except Exception:
         return []
 
 
-@st.cache_data(ttl=600)
-def get_confirmed_lineup(game_pk: int) -> dict:
-    """
-    Returns confirmed batting orders for a specific game.
-    { 'away': [player_names], 'home': [player_names] }
-    Returns empty lists if lineups not yet posted.
-    """
-    if not _check_available():
-        return {'away': [], 'home': []}
-    try:
-        data = statsapi.get('game', {'gamePk': game_pk, 'hydrate': 'lineups'})
-        lineups = data.get('liveData', {}).get('lineups', {})
-        def extract_names(side):
-            return [p.get('fullName', '') for p in lineups.get(side, {}).get('battingOrder', [])]
-        return {
-            'away': extract_names('awayPlayers'),
-            'home': extract_names('homePlayers'),
-        }
-    except Exception:
-        return {'away': [], 'home': []}
+@st.cache_data(ttl=300)
+def get_confirmed_batters() -> set:
+    """Returns set of confirmed batter full names across all today's games."""
+    if not _api_ok():
+        return set()
+    games   = get_todays_schedule()
+    batters = set()
+    for g in games:
+        if not g['lineups_posted'] or not g['game_pk']:
+            continue
+        try:
+            data    = statsapi.get('game', {'gamePk': g['game_pk'],
+                                            'hydrate': 'lineups'})
+            lineups = data.get('liveData', {}).get('lineups', {})
+            for side in ('awayPlayers', 'homePlayers'):
+                for p in lineups.get(side, {}).get('battingOrder', []):
+                    name = p.get('fullName', '')
+                    if name:
+                        batters.add(name)
+        except Exception:
+            continue
+    return batters
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LINEUP STATUS HELPER (for sidebar indicator)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def get_lineup_status_map() -> dict:
-    """
-    Returns a dict mapping game string → lineup status emoji.
-    '✅ Confirmed' or '⏳ Pending'
-    Used to display lineup confirmation status in the UI.
-    """
-    games = get_todays_schedule()
-    status_map = {}
+    """Returns { 'Away @ Home': {'status', 'away_sp', 'home_sp', 'game_time'} }"""
+    games  = get_todays_schedule()
+    result = {}
     for g in games:
         key = f"{g['away_team']} @ {g['home_team']}"
-        status_map[key] = '✅ Confirmed' if g['lineups_posted'] else '⏳ Pending'
-    return status_map
+        result[key] = {
+            'status':    '✅ Confirmed' if g['lineups_posted'] else '⏳ Pending',
+            'away_sp':   g['away_pitcher'] or 'TBD',
+            'home_sp':   g['home_pitcher'] or 'TBD',
+            'game_time': g['game_time'],
+        }
+    return result

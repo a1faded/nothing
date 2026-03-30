@@ -1,5 +1,5 @@
 """
-ui/sidebar.py — Sidebar filters and filter application
+sidebar.py — Sidebar filters, filter application, lineup status panel
 """
 
 import streamlit as st
@@ -20,9 +20,10 @@ def build_filters(df: pd.DataFrame) -> dict:
         "💣 HR Score  — Home Run":                "hr",
     }
     label = st.sidebar.selectbox("Choose Your Betting Target", list(target_map.keys()))
-    filters['target']    = target_map[label]
-    score_col_map        = {'hit':'Hit_Score','single':'Single_Score','xb':'XB_Score','hr':'HR_Score'}
-    filters['score_col'] = score_col_map[filters['target']]
+    filters['target']         = target_map[label]
+    score_col_map             = {'hit':'Hit_Score','single':'Single_Score',
+                                  'xb':'XB_Score','hr':'HR_Score'}
+    filters['score_col']      = score_col_map[filters['target']]
     filters['score_col_base'] = filters['score_col']
 
     st.sidebar.markdown("### 🏟️ Park Adjustment")
@@ -34,10 +35,8 @@ def build_filters(df: pd.DataFrame) -> dict:
     st.sidebar.markdown("### 🌦️ Game Conditions")
     filters['use_gc'] = st.sidebar.toggle(
         "🌦️ Game Conditions (Full Weight)", value=True,
-        help=(
-            "ON → Full game-environment ceiling applied (±40% Hit/Single/XB, ±35% HR).\n"
-            "OFF → 30% of full weight applied (not zero)."
-        )
+        help="ON → Full game-environment ceiling (±40% Hit/XB, ±35% HR).\n"
+             "OFF → 30% of full weight."
     )
     if filters['use_gc']:
         st.sidebar.markdown(
@@ -96,11 +95,48 @@ def build_filters(df: pd.DataFrame) -> dict:
         "vs Grade (High→Low)":      ("vs Grade",           False),
         "Pitcher Grade (A+→D)":     ("pitch_grade",        True),
     }
-    filters['sort_label'] = st.sidebar.selectbox("Sort By", list(sort_options.keys()))
+    filters['sort_label']   = st.sidebar.selectbox("Sort By", list(sort_options.keys()))
     filters['sort_col'], filters['sort_asc'] = sort_options[filters['sort_label']]
-    filters['result_count'] = st.sidebar.selectbox("Show Top N", [5,10,15,20,25,30,"All"], index=2)
-    filters['best_per_team'] = st.sidebar.checkbox("🏟️ Best player per team only", value=False)
+    filters['result_count'] = st.sidebar.selectbox("Show Top N",
+                                                    [5,10,15,20,25,30,"All"], index=2)
+    filters['best_per_team'] = st.sidebar.checkbox("🏟️ Best player per team only",
+                                                    value=False)
     return filters
+
+
+def render_lineup_status_sidebar():
+    """
+    Show today's lineup confirmation status in the sidebar.
+    Called from app.py after build_filters.
+    """
+    try:
+        from mlb_api import get_lineup_status_map
+        status_map = get_lineup_status_map()
+        if not status_map:
+            return
+
+        confirmed = sum(1 for v in status_map.values() if '✅' in v['status'])
+        total     = len(status_map)
+
+        st.sidebar.markdown("### 📋 Lineup Status")
+        st.sidebar.markdown(
+            f'<div style="font-size:.75rem;color:#64748b;margin-bottom:.3rem">'
+            f'{confirmed}/{total} games confirmed</div>',
+            unsafe_allow_html=True
+        )
+        for matchup, info in status_map.items():
+            icon = '✅' if '✅' in info['status'] else '⏳'
+            st.sidebar.markdown(
+                f'<div style="font-size:.72rem;padding:.2rem 0;border-bottom:'
+                f'1px solid #1e2d3d;color:#e2e8f0">'
+                f'{icon} <b>{matchup}</b><br>'
+                f'<span style="color:#64748b;font-size:.65rem">'
+                f'SP: {info["away_sp"]} / {info["home_sp"]}</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+    except Exception:
+        pass    # silently skip if API unavailable
 
 
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
@@ -134,7 +170,8 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
         out = out[out[mc] >= filters['min_prob']]
 
     if filters['min_vs'] > -10:
-        out = out[pd.to_numeric(out['vs Grade'], errors='coerce').fillna(-10) >= filters['min_vs']]
+        out = out[pd.to_numeric(out['vs Grade'], errors='coerce').fillna(-10)
+                  >= filters['min_vs']]
 
     sc     = filters['score_col']
     sc_eff = sc if sc in out.columns else filters.get('score_col_base', sc)
@@ -157,7 +194,6 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 
 
 def get_slate_df(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
-    """Full slate with player exclusions only — for persistent summary sections."""
     if df is None or df.empty:
         return df
     out = df.copy()

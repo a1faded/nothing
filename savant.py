@@ -1,14 +1,14 @@
 """
-data/savant.py — Baseball Savant / Statcast Integration
-=========================================================
-Uses the pybaseball package to pull Statcast data from Baseball Savant.
-Provides: barrel%, xSLG, EV, launch angle, pitch-level data.
+savant.py — Baseball Savant / Statcast Integration
+====================================================
+Uses pybaseball to pull Statcast metrics.
 
-These supplement (not replace) BallPark Pal simulation data.
-They are the data points BallPark Pal CSVs don't cover —
-Statcast quality-of-contact metrics that inform HR/XB confidence.
+KEY DESIGN: Instead of slow per-player Statcast calls, we use a single
+batting_stats() call (FanGraphs season data) which returns barrel%, HardHit%,
+and max EV for ALL qualified hitters in one request. We then join to the slate
+by player name. This is fast and cache-friendly.
 
-Install: pip install pybaseball
+Per-player Statcast pitch-level data is reserved for the Player Deep Dive panel.
 """
 
 import streamlit as st
@@ -18,169 +18,166 @@ from datetime import date, timedelta
 try:
     from pybaseball import (
         statcast_batter,
-        statcast_pitcher,
         playerid_lookup,
         batting_stats,
-        pitching_stats,
     )
     from pybaseball import cache as pb_cache
     pb_cache.enable()
-    _PYBASEBALL_AVAILABLE = True
+    _PB_AVAILABLE = True
 except ImportError:
-    _PYBASEBALL_AVAILABLE = False
+    _PB_AVAILABLE = False
 
 
-def _check_available():
-    if not _PYBASEBALL_AVAILABLE:
-        st.warning("⚠️ pybaseball not installed. Run: pip install pybaseball")
-        return False
-    return True
+def _pb_ok() -> bool:
+    return _PB_AVAILABLE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PLAYER ID LOOKUP (Savant uses MLBAM IDs same as Stats API)
+# SEASON STATCAST LEADERS  —  single batch call, join to slate
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=86400)  # 24 hours — IDs don't change
-def get_savant_player_id(last_name: str, first_name: str) -> int | None:
-    """Look up a player's MLBAM ID via pybaseball."""
-    if not _check_available():
-        return None
+@st.cache_data(ttl=7200)   # 2 hours — season stats don't change minute to minute
+def get_season_statcast_df(season: int = None) -> pd.DataFrame:
+    """
+    Pull FanGraphs season batting stats for all hitters (qual=10 PA).
+    Returns DataFrame with columns we need: Name, Barrel%, HardHit%, maxEV, xBA, xSLG.
+    Single call — fast. Cache 2h.
+    """
+    if not _pb_ok():
+        return pd.DataFrame()
+    if season is None:
+        season = date.today().year
     try:
-        result = playerid_lookup(last_name, first_name)
-        if not result.empty:
-            return int(result.iloc[0]['key_mlbam'])
-    except Exception as e:
-        st.warning(f"⚠️ Player ID lookup failed for {first_name} {last_name}: {e}")
-    return None
+        df = batting_stats(season, season, qual=10)
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # Normalise column names — FanGraphs columns vary slightly by season
+        col_map = {}
+        for col in df.columns:
+            cl = col.lower().replace(' ', '').replace('%', 'pct').replace('/', '_')
+            col_map[col] = cl
+        df = df.rename(columns=col_map)
+
+        # Keep only what we need, rename to clean labels
+        keep = {'name': 'fg_name'}
+        candidates = {
+            'barrel%': 'Barrel%', 'barrelpct': 'Barrel%',
+            'hardhit%': 'HH%', 'hardhitpct': 'HH%',
+            'maxev': 'maxEV', 'ev95percent': 'EV95%',
+            'xba': 'xBA', 'xslg': 'xSLG',
+            'avgexitvelocity': 'AvgEV',
+        }
+        for raw, clean in candidates.items():
+            if raw in df.columns and clean not in keep.values():
+                keep[raw] = clean
+
+        available = {k: v for k, v in keep.items() if k in df.columns}
+        if 'name' not in available:
+            return pd.DataFrame()
+
+        out = df[list(available.keys())].rename(columns=available).copy()
+        # Build a last-name lookup key for fuzzy matching
+        out['_last'] = out['fg_name'].astype(str).str.split().str[-1].str.lower()
+        return out.reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+def join_statcast_to_slate(slate_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Left-join Statcast season metrics onto the slate DataFrame.
+    Matches on last name. If multiple players share a last name,
+    picks the one whose first initial also matches.
+    Adds columns: Barrel%, HH%, xBA, xSLG (where available).
+    """
+    savant_df = get_season_statcast_df()
+    if savant_df.empty or slate_df.empty:
+        return slate_df
+
+    df = slate_df.copy()
+    # Build lookup keys from batter names
+    df['_last'] = df['Batter'].astype(str).str.split().str[-1].str.lower()
+    df['_first_init'] = df['Batter'].astype(str).str[0].str.lower()
+
+    savant_df['_first_init'] = savant_df['fg_name'].astype(str).str[0].str.lower()
+
+    # Merge on last name
+    merged = df.merge(
+        savant_df.drop(columns=['fg_name'], errors='ignore'),
+        on='_last', how='left', suffixes=('', '_sv')
+    )
+
+    # If there are duplicates (same last name), keep row where first initial matches
+    if merged.index.duplicated().any():
+        init_match = merged['_first_init'] == merged['_first_init_sv']
+        merged = merged[~merged.index.duplicated(keep='first') | init_match]
+
+    # Drop helper columns
+    drop_cols = [c for c in merged.columns if c.startswith('_')]
+    merged.drop(columns=drop_cols, inplace=True, errors='ignore')
+
+    return merged.reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BATTER STATCAST (recent pitch-level data)
+# PER-PLAYER STATCAST  —  for Player Deep Dive panel
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600)
 def get_batter_statcast(player_id: int, days_back: int = 30) -> pd.DataFrame:
-    """
-    Pull Statcast pitch-level data for a batter over the last N days.
-    Returns DataFrame with: launch_speed, launch_angle, estimated_ba_using_speedangle,
-    estimated_woba_using_speedangle, bb_type, events, pitch_type, etc.
-    """
-    if not _check_available():
+    """Pitch-level Statcast for a single batter over last N days."""
+    if not _pb_ok():
         return pd.DataFrame()
     try:
         end_dt   = date.today().strftime('%Y-%m-%d')
         start_dt = (date.today() - timedelta(days=days_back)).strftime('%Y-%m-%d')
         df = statcast_batter(start_dt, end_dt, player_id)
-        return df if df is not None else pd.DataFrame()
-    except Exception as e:
-        st.warning(f"⚠️ Statcast batter data failed for player {player_id}: {e}")
+        return df if df is not None and not df.empty else pd.DataFrame()
+    except Exception:
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
 def get_batter_quality_metrics(player_id: int, days_back: int = 30) -> dict:
     """
-    Summarise a batter's Statcast quality-of-contact metrics.
-    Returns: { avg_ev, max_ev, barrel_pct, hard_hit_pct, xba, xslg, launch_angle }
+    Summarise quality-of-contact metrics for a single batter.
+    Returns: avg_ev, max_ev, barrel_pct, hard_hit_pct, xba, xslg, avg_la, sample_size
     """
     df = get_batter_statcast(player_id, days_back)
     if df.empty:
         return {}
-
-    batted_balls = df[df['launch_speed'].notna()]
-    if batted_balls.empty:
+    bb = df[df['launch_speed'].notna()]
+    if bb.empty:
         return {}
 
-    barrel_mask   = batted_balls['launch_speed_angle'] == 6  # Statcast barrel code
-    hard_hit_mask = batted_balls['launch_speed'] >= 95
+    barrel_mask   = bb.get('launch_speed_angle', pd.Series()) == 6
+    hard_hit_mask = bb['launch_speed'] >= 95
 
-    return {
-        'avg_ev':       round(batted_balls['launch_speed'].mean(), 1),
-        'max_ev':       round(batted_balls['launch_speed'].max(), 1),
-        'barrel_pct':   round(barrel_mask.mean() * 100, 1),
-        'hard_hit_pct': round(hard_hit_mask.mean() * 100, 1),
-        'xba':          round(df['estimated_ba_using_speedangle'].mean(), 3) if 'estimated_ba_using_speedangle' in df.columns else None,
-        'xslg':         round(df['estimated_woba_using_speedangle'].mean(), 3) if 'estimated_woba_using_speedangle' in df.columns else None,
-        'avg_la':       round(batted_balls['launch_angle'].mean(), 1),
-        'sample_size':  len(batted_balls),
+    metrics = {
+        'avg_ev':       round(float(bb['launch_speed'].mean()), 1),
+        'max_ev':       round(float(bb['launch_speed'].max()), 1),
+        'barrel_pct':   round(float(barrel_mask.mean() * 100), 1),
+        'hard_hit_pct': round(float(hard_hit_mask.mean() * 100), 1),
+        'avg_la':       round(float(bb['launch_angle'].mean()), 1),
+        'sample_size':  len(bb),
     }
+    if 'estimated_ba_using_speedangle' in df.columns:
+        metrics['xba']  = round(float(df['estimated_ba_using_speedangle'].mean()), 3)
+    if 'estimated_woba_using_speedangle' in df.columns:
+        metrics['xwoba'] = round(float(df['estimated_woba_using_speedangle'].mean()), 3)
+    return metrics
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PITCHER STATCAST
-# ─────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=3600)
-def get_pitcher_statcast(player_id: int, days_back: int = 30) -> pd.DataFrame:
-    """Pull Statcast pitch-level data for a pitcher."""
-    if not _check_available():
-        return pd.DataFrame()
+@st.cache_data(ttl=86400)
+def get_savant_player_id(last_name: str, first_name: str):
+    """Look up MLBAM ID via pybaseball playerid_lookup."""
+    if not _pb_ok():
+        return None
     try:
-        end_dt   = date.today().strftime('%Y-%m-%d')
-        start_dt = (date.today() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-        df = statcast_pitcher(start_dt, end_dt, player_id)
-        return df if df is not None else pd.DataFrame()
-    except Exception as e:
-        st.warning(f"⚠️ Statcast pitcher data failed for player {player_id}: {e}")
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=3600)
-def get_pitcher_arsenal(player_id: int, days_back: int = 30) -> pd.DataFrame:
-    """
-    Summarise a pitcher's arsenal: pitch type, usage%, avg velo, avg spin.
-    Returns DataFrame with one row per pitch type.
-    """
-    df = get_pitcher_statcast(player_id, days_back)
-    if df.empty or 'pitch_type' not in df.columns:
-        return pd.DataFrame()
-
-    pitches = df[df['pitch_type'].notna()].copy()
-    total   = len(pitches)
-    summary = pitches.groupby('pitch_name').agg(
-        count         = ('pitch_type', 'count'),
-        avg_velo      = ('release_speed', 'mean'),
-        avg_spin      = ('release_spin_rate', 'mean'),
-    ).reset_index()
-    summary['usage_pct'] = (summary['count'] / total * 100).round(1)
-    summary['avg_velo']  = summary['avg_velo'].round(1)
-    summary['avg_spin']  = summary['avg_spin'].round(0)
-    return summary.sort_values('usage_pct', ascending=False)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SEASON LEADERBOARDS (FanGraphs via pybaseball)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=7200)  # 2 hours
-def get_season_batting_stats(season: int = None) -> pd.DataFrame:
-    """
-    Pull season-level FanGraphs batting stats for all qualified hitters.
-    Includes: AVG, OBP, SLG, wOBA, xFIP, barrel%, HardHit%, etc.
-    """
-    if not _check_available():
-        return pd.DataFrame()
-    if season is None:
-        season = date.today().year
-    try:
-        df = batting_stats(season, season, qual=50)
-        return df if df is not None else pd.DataFrame()
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch season batting stats: {e}")
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=7200)
-def get_season_pitching_stats(season: int = None) -> pd.DataFrame:
-    """Pull season-level FanGraphs pitching stats."""
-    if not _check_available():
-        return pd.DataFrame()
-    if season is None:
-        season = date.today().year
-    try:
-        df = pitching_stats(season, season, qual=10)
-        return df if df is not None else pd.DataFrame()
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch season pitching stats: {e}")
-        return pd.DataFrame()
+        result = playerid_lookup(last_name, first_name)
+        if not result.empty:
+            return int(result.iloc[0]['key_mlbam'])
+    except Exception:
+        pass
+    return None

@@ -8,8 +8,8 @@ import itertools
 import random
 from datetime import datetime
 from config import CONFIG, SCORE_MAP, LABEL_MAP, SCORE_CSS
-from utils.helpers import grade_pill
-from scoring.engine import gc_adjusted_score
+from helpers import grade_pill
+from engine import gc_adjusted_score
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COMBO BUILDER

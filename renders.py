@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from config import CONFIG
-from utils.helpers import grade_pill, style_grade_cell, data_freshness_badge
+from helpers import grade_pill, style_grade_cell, data_freshness_badge
 
 
 # ─────────────────────────────────────────────────────────────────────────────

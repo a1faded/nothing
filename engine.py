@@ -8,7 +8,7 @@ All pure DataFrame → DataFrame transforms. No Streamlit calls here.
 import pandas as pd
 import numpy as np
 from config import CONFIG
-from utils.helpers import normalize_0_100
+from helpers import normalize_0_100
 
 
 # ─────────────────────────────────────────────────────────────────────────────

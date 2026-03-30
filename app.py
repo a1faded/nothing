@@ -29,9 +29,9 @@ st.set_page_config(
 )
 
 # ── Module imports ─────────────────────────────────────────────────────────────
-from ui.styles   import inject_css
-from ui.sidebar  import build_filters, apply_filters, get_slate_df
-from ui.renders  import (
+from styles   import inject_css
+from sidebar  import build_filters, apply_filters, get_slate_df
+from renders  import (
     render_header,
     render_stat_bar,
     render_score_summary_cards,
@@ -42,10 +42,10 @@ from ui.renders  import (
     render_best_per_target,
     render_visualizations,
 )
-from ui.parlay    import parlay_page
-from ui.reference import info_page
+from parlay    import parlay_page
+from reference import info_page
 
-from data.loader  import (
+from loader  import (
     load_matchups,
     load_pitcher_data,
     load_game_conditions,
@@ -53,7 +53,7 @@ from data.loader  import (
     merge_pitcher_data,
     merge_game_conditions,
 )
-from scoring.engine import (
+from engine import (
     compute_metrics,
     compute_scores,
     compute_game_condition_scores,

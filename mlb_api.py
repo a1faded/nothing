@@ -2,7 +2,6 @@
 mlb_api.py — MLB Stats API Integration
 ========================================
 Provides: lineup confirmations, player game logs, player ID lookup.
-Uses the mlb-statsapi Python package (free, no auth required).
 """
 
 import streamlit as st
@@ -26,24 +25,37 @@ def _api_ok() -> bool:
 
 @st.cache_data(ttl=86400)
 def lookup_player_id(full_name: str):
+    """
+    Multi-strategy player ID lookup.
+    1. Full name exact
+    2. Last name only (pick first active hitter)
+    3. First + Last reversed
+    Returns MLBAM int ID or None.
+    """
     if not _api_ok():
         return None
-    try:
-        results = statsapi.lookup_player(full_name)
-        if results:
-            return results[0]['id']
-        last = full_name.strip().split()[-1]
-        results = statsapi.lookup_player(last)
-        if results:
-            return results[0]['id']
-    except Exception:
-        pass
+    name = full_name.strip()
+    parts = name.split()
+    strategies = [name]
+    if len(parts) >= 2:
+        strategies.append(parts[-1])               # last name only
+        strategies.append(f"{parts[-1]} {parts[0]}")  # Last First
+    for query in strategies:
+        try:
+            results = statsapi.lookup_player(query)
+            if results:
+                # Prefer active players
+                active = [r for r in results if r.get('active', True)]
+                pick   = active[0] if active else results[0]
+                return pick['id']
+        except Exception:
+            continue
     return None
 
 
 @st.cache_data(ttl=86400)
 def build_player_id_map(batter_names: tuple) -> dict:
-    """Batch-resolve batter names to MLBAM IDs. Cached 24h."""
+    """Batch-resolve batter names → MLBAM IDs. Cached 24h."""
     id_map = {}
     for name in batter_names:
         pid = lookup_player_id(name)
@@ -58,7 +70,7 @@ def build_player_id_map(batter_names: tuple) -> dict:
 
 @st.cache_data(ttl=1800)
 def get_player_game_log(player_id: int, last_n: int = 10) -> pd.DataFrame:
-    """Last N games hitting log. Columns: Date, Opp, AB, H, 2B, HR, RBI, BB, K, AVG"""
+    """Last N games hitting log. Returns most recent games first."""
     if not _api_ok():
         return pd.DataFrame()
     season = date.today().year
@@ -96,7 +108,6 @@ def get_player_game_log(player_id: int, last_n: int = 10) -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def get_todays_schedule() -> list:
-    """Returns today's games with lineup posted status and probable pitchers."""
     if not _api_ok():
         return []
     try:
@@ -122,7 +133,6 @@ def get_todays_schedule() -> list:
 
 @st.cache_data(ttl=300)
 def get_confirmed_batters() -> set:
-    """Returns set of confirmed batter full names across all today's games."""
     if not _api_ok():
         return set()
     games   = get_todays_schedule()
@@ -146,7 +156,6 @@ def get_confirmed_batters() -> set:
 
 @st.cache_data(ttl=300)
 def get_lineup_status_map() -> dict:
-    """Returns { 'Away @ Home': {'status', 'away_sp', 'home_sp', 'game_time'} }"""
     games  = get_todays_schedule()
     result = {}
     for g in games:

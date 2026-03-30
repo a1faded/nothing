@@ -1,7 +1,7 @@
 """
-app.py — A1PICKS MLB Hit Predictor  V5.0
+app.py — A1PICKS MLB Hit Predictor  V5.1
 ==========================================
-Entry point. Wires all modules together.
+Entry point. Navigation: Predictor | Player Profile | Parlay Builder | Reference
 """
 
 import streamlit as st
@@ -14,22 +14,55 @@ st.set_page_config(
     page_icon="⚾",
 )
 
-from styles    import inject_css
-from sidebar   import (build_filters, apply_filters, get_slate_df,
-                        render_lineup_status_sidebar)
-from renders   import (render_header, render_stat_bar, render_score_summary_cards,
-                        render_pitcher_landscape, render_park_notice,
-                        render_game_conditions_panel, render_results_table,
-                        render_best_per_target, render_visualizations,
-                        render_player_deep_dive)
-from parlay    import parlay_page
-from reference import info_page
+from styles         import inject_css
+from sidebar        import (build_filters, apply_filters, get_slate_df,
+                             render_lineup_status_sidebar)
+from renders        import (render_header, render_stat_bar, render_score_summary_cards,
+                             render_pitcher_landscape, render_park_notice,
+                             render_game_conditions_panel, render_results_table,
+                             render_best_per_target, render_visualizations)
+from player_profile import player_profile_page
+from parlay         import parlay_page
+from reference      import info_page
 
 from loader  import (load_matchups, load_pitcher_data, load_game_conditions,
                       load_pitcher_qs, merge_pitcher_data, merge_game_conditions)
 from engine  import (compute_metrics, compute_scores, compute_game_condition_scores)
 
 inject_css()
+
+
+def _load_and_score(use_park=True, use_gc=True):
+    """Shared data pipeline used by both Predictor and Parlay pages."""
+    raw_df     = load_matchups()
+    if raw_df is None:
+        return None, None, None, None
+    pitcher_df = load_pitcher_data()
+    game_cond  = load_game_conditions()
+    qs_df      = load_pitcher_qs()
+    df = compute_metrics(raw_df, use_park=use_park)
+    df = merge_pitcher_data(df, pitcher_df)
+
+    # Join Statcast BEFORE scoring so scores can use Barrel%/HH%
+    try:
+        from savant import join_statcast_to_slate
+        df = join_statcast_to_slate(df)
+    except Exception:
+        pass
+
+    df = compute_scores(df)
+    df = merge_game_conditions(df, game_cond, qs_df)
+    df = compute_game_condition_scores(df, use_gc=use_gc)
+    return df, pitcher_df, game_cond, qs_df
+
+
+def _get_player_id_map(df):
+    try:
+        from mlb_api import build_player_id_map
+        batter_names = tuple(sorted(df['Batter'].unique().tolist()))
+        return build_player_id_map(batter_names)
+    except Exception:
+        return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,6 +73,7 @@ def main_page():
     render_header()
 
     with st.spinner("⚾ Loading today's matchups…"):
+        filters    = {}   # Need raw_df first for filters
         raw_df     = load_matchups()
         pitcher_df = load_pitcher_data()
         game_cond  = load_game_conditions()
@@ -50,29 +84,21 @@ def main_page():
         return
 
     filters = build_filters(raw_df)
-    df      = compute_metrics(raw_df, use_park=filters['use_park'])
-    df      = merge_pitcher_data(df, pitcher_df)
-    df      = compute_scores(df)
-    df      = merge_game_conditions(df, game_cond, qs_df)
-    df      = compute_game_condition_scores(df, use_gc=filters.get('use_gc', True))
 
-    # ── Join Statcast season metrics (single batch call) ──────────────────────
+    df = compute_metrics(raw_df, use_park=filters['use_park'])
+    df = merge_pitcher_data(df, pitcher_df)
+
+    # Statcast join BEFORE scoring
     try:
         from savant import join_statcast_to_slate
         df = join_statcast_to_slate(df)
     except Exception:
-        pass  # graceful — app works without Statcast
-
-    # ── Build player ID map for game log lookups (cached 24h) ─────────────────
-    player_id_map = {}
-    try:
-        from mlb_api import build_player_id_map
-        batter_names  = tuple(sorted(df['Batter'].unique().tolist()))
-        player_id_map = build_player_id_map(batter_names)
-    except Exception:
         pass
 
-    # ── GC score column upgrade ───────────────────────────────────────────────
+    df = compute_scores(df)
+    df = merge_game_conditions(df, game_cond, qs_df)
+    df = compute_game_condition_scores(df, use_gc=filters.get('use_gc', True))
+
     if filters.get('use_gc', False):
         gc_col = filters['score_col'] + '_gc'
         if gc_col in df.columns:
@@ -110,7 +136,6 @@ def main_page():
 """, unsafe_allow_html=True)
 
     render_results_table(filtered_df, filters)
-    render_player_deep_dive(filtered_df, player_id_map)   # ← NEW: game log + statcast
     render_best_per_target(slate_df, filters)
 
     if not filtered_df.empty:
@@ -151,12 +176,41 @@ def main():
 
     page = st.sidebar.radio(
         "Navigate",
-        ["⚾ Predictor", "⚡ Parlay Builder", "📚 Reference Manual"],
+        ["⚾ Predictor", "👤 Player Profile", "⚡ Parlay Builder", "📚 Reference Manual"],
         index=0
     )
 
     if page == "⚾ Predictor":
         main_page()
+
+    elif page == "👤 Player Profile":
+        with st.spinner("Loading slate data…"):
+            raw_df = load_matchups()
+        if raw_df is None:
+            st.error("❌ Could not load Matchups data.")
+        else:
+            pitcher_df  = load_pitcher_data()
+            game_cond   = load_game_conditions()
+            qs_df       = load_pitcher_qs()
+            df = compute_metrics(raw_df, use_park=True)
+            df = merge_pitcher_data(df, pitcher_df)
+            try:
+                from savant import join_statcast_to_slate
+                df = join_statcast_to_slate(df)
+            except Exception:
+                pass
+            df = compute_scores(df)
+            df = merge_game_conditions(df, game_cond, qs_df)
+            df = compute_game_condition_scores(df, use_gc=True)
+
+            # Build filters just for GC context (don't render sidebar filters here)
+            filters = {
+                'use_gc': True, 'use_park': True,
+                'score_col': 'Hit_Score', 'score_col_base': 'Hit_Score',
+            }
+            player_id_map = _get_player_id_map(df)
+            player_profile_page(df, player_id_map, filters)
+
     elif page == "⚡ Parlay Builder":
         raw_df = load_matchups()
         if raw_df is not None:
@@ -165,6 +219,11 @@ def main():
             qs_df      = load_pitcher_qs()
             df = compute_metrics(raw_df, use_park=True)
             df = merge_pitcher_data(df, pitcher_df)
+            try:
+                from savant import join_statcast_to_slate
+                df = join_statcast_to_slate(df)
+            except Exception:
+                pass
             df = compute_scores(df)
             df = merge_game_conditions(df, game_cond, qs_df)
             df = compute_game_condition_scores(df, use_gc=True)
@@ -174,14 +233,14 @@ def main():
             parlay_page(df)
         else:
             st.error("❌ Could not load data for Parlay Builder.")
+
     else:
         info_page()
 
-    # ── Lineup status always visible in sidebar ──────────────────────────────
-    render_lineup_status_sidebar()   # ← NEW: per-game ✅/⏳ with SPs
+    render_lineup_status_sidebar()
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("V5.0 · BallPark Pal + MLB Stats API + Statcast")
+    st.sidebar.caption("V5.1 · BallPark Pal + MLB Stats API + Statcast")
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ def get_season_statcast_df(season: int = None) -> pd.DataFrame:
     Pull FanGraphs season batting stats for all hitters (qual=10 PA).
     Returns DataFrame with columns we need: Name, Barrel%, HardHit%, maxEV, xBA, xSLG.
     Single call — fast. Cache 2h.
+    Falls back to prior season if current season is too early (< 50 players qualify).
     """
     if not _pb_ok():
         return pd.DataFrame()
@@ -49,6 +50,9 @@ def get_season_statcast_df(season: int = None) -> pd.DataFrame:
         season = date.today().year
     try:
         df = batting_stats(season, season, qual=10)
+        # Early season fallback — if fewer than 50 qualified hitters, use prior season
+        if df is None or len(df) < 50:
+            df = batting_stats(season - 1, season - 1, qual=100)
         if df is None or df.empty:
             return pd.DataFrame()
 

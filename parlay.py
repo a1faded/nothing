@@ -121,7 +121,7 @@ to see game context for parlay legs.
 
     if display_rows:
         st.markdown("**🌦️ Game Environment for Parlay Legs**")
-        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(display_rows), width="stretch", hide_index=True)
         st.markdown(
             '<div class="notice notice-info" style="font-size:.73rem;margin-top:.3rem">'
             '✅ = above median (favourable) · ⚠️ = below median (tighter). '

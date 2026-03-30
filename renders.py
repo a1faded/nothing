@@ -239,7 +239,7 @@ def render_game_conditions_panel(slate_df: pd.DataFrame, filters: dict,
         styled   = gdf_disp.style.format({'Cond Δ (avg)': '{:+.1f}'})
         styled   = styled.background_gradient(subset=['Cond Δ (avg)'],
                                                cmap='RdYlGn', vmin=-8, vmax=8)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -357,7 +357,7 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
             lambda x: [style_grade_cell(v) if x.name == 'P.Grd' else '' for v in x], axis=0
         )
 
-    st.dataframe(styled, use_container_width=True)
+    st.dataframe(styled, width="stretch")
 
     LG        = CONFIG
     park_note = (
@@ -419,7 +419,7 @@ def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
                     styled_log = log_df.style.applymap(
                         _style_hits, subset=['H']
                     ).format({'AVG': '{}'})
-                    st.dataframe(styled_log, use_container_width=True, hide_index=True)
+                    st.dataframe(styled_log, width="stretch", hide_index=True)
 
                     # Mini form summary
                     if 'H' in log_df.columns and 'AB' in log_df.columns:
@@ -639,4 +639,4 @@ def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col
             ).round(1).sort_values('AvgHitProb', ascending=False).reset_index()
             ts.columns = ['Team','Players','Avg Hit%','🎯 Hit','🔥 XB','💣 HR']
             st.markdown("**Team Summary**")
-            st.dataframe(ts, use_container_width=True, hide_index=True)
+            st.dataframe(ts, width="stretch", hide_index=True)

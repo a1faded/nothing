@@ -83,6 +83,48 @@ def _enrich_with_ids(df, player_id_map):
         return df
 
 
+def _merge_signal_metadata(df, order_map: dict, form_map: dict,
+                            handedness_map: dict) -> pd.DataFrame:
+    """
+    Attach signal data as display columns so renders.py / player_profile.py
+    can surface them without re-fetching.
+
+    Columns added:
+      _order_pos    int 1-9 batting slot  (NaN = unconfirmed)
+      _form_rate    float H/G last 7 days (NaN = missing)
+      _form_label   '🔥 HOT' / '❄️ COLD' / None
+      _pitcher_hand 'L' / 'R' / None
+    """
+    from config import CONFIG as _cfg
+    df = df.copy()
+
+    if order_map:
+        df['_order_pos'] = df['Batter'].map(order_map)
+
+    if form_map:
+        HOT  = _cfg['form_hot_threshold']
+        COLD = _cfg['form_cold_threshold']
+
+        def _label(name):
+            info = form_map.get(name)
+            if not info or info.get('games', 0) < 3:
+                return None
+            rate = info.get('hit_rate', 0)
+            if rate >= HOT:  return '🔥 HOT'
+            if rate <= COLD: return '❄️ COLD'
+            return None
+
+        df['_form_rate']  = df['Batter'].apply(
+            lambda n: form_map.get(n, {}).get('hit_rate'))
+        df['_form_label'] = df['Batter'].apply(_label)
+
+    if handedness_map:
+        df['_pitcher_hand'] = df['Pitcher'].apply(
+            lambda p: handedness_map.get(p.split()[-1]) if p else None)
+
+    return df
+
+
 def _fetch_signal_data() -> tuple[dict, dict, dict]:
     """
     Fetch all three new signal dicts in parallel-ish order.
@@ -142,6 +184,7 @@ def main_page():
 
         player_id_map = _get_player_id_map(df)
         df = _enrich_with_ids(df, player_id_map)
+        df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
 
     # ── Apply confirmed lineup filter if toggled ───────────────────────────────
     if filters.get('confirmed_only') and order_map:
@@ -254,9 +297,13 @@ def main():
                                       handedness_map=handedness_map)
                 player_id_map = _get_player_id_map(df)
                 df = _enrich_with_ids(df, player_id_map)
+                df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
             filters = {'use_gc':True,'use_park':True,
                        'score_col':'Hit_Score','score_col_base':'Hit_Score'}
-            player_profile_page(df, player_id_map, filters)
+            player_profile_page(df, player_id_map, filters,
+                                order_map=order_map,
+                                form_map=form_map,
+                                handedness_map=handedness_map)
 
     elif page == "⚡ Parlay Builder":
         if raw_df is None:

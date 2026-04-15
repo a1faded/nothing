@@ -380,6 +380,17 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         if (use_gc and sc_gc in disp.columns) else 0.0
     )
 
+    # ── New signal columns ─────────────────────────────────────────────────────
+    has_order = '_order_pos' in disp.columns and disp['_order_pos'].notna().any()
+    has_form  = '_form_label' in disp.columns
+
+    if has_order:
+        disp['Pos'] = disp['_order_pos'].apply(
+            lambda x: f"#{int(x)}" if pd.notna(x) else "—"
+        )
+    if has_form:
+        disp['Form'] = disp['_form_label'].fillna('—')
+
     lbl          = {'Hit_Score':'🎯 Hit','Single_Score':'1️⃣ Single',
                     'XB_Score':'🔥 XB','HR_Score':'💣 HR'}
     active       = lbl.get(sc_base, 'Score')
@@ -387,6 +398,10 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
 
     cols = {'Batter':'Batter','Team':'Team','Pitcher':'Pitcher',
             'pitch_grade':'P.Grd', sc: active_label}
+
+    # Inject Pos immediately after Batter/Team when available
+    if has_order and 'Pos' in disp.columns:
+        cols['Pos'] = 'Pos'
 
     if use_park and base_sc in disp.columns:
         cols[base_sc]  = 'Base'
@@ -402,6 +417,10 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
                  'p_k':'K%','p_bb':'BB%','K% ↓Lg':'K% ↓Lg',
                  'BB% ↓Lg':'BB% ↓Lg','HR% ↑Lg':'HR% ↑Lg',
                  'vs Grade':'vsPit','PA':'PA','AVG':'AVG'})
+
+    # Form near the end (before Statcast)
+    if has_form and 'Form' in disp.columns:
+        cols['Form'] = 'Form'
 
     statcast_cols = {'Barrel%':'Barrel%','HH%':'HH%','xBA':'xBA',
                      'xSLG':'xSLG','AvgEV':'AvgEV','maxEV':'maxEV'}
@@ -653,6 +672,32 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
                     f'{row["Barrel%"]:.1f}%</span></div>'
                 )
 
+            # Batting order slot
+            order_row = ""
+            if '_order_pos' in slate_df.columns and pd.notna(row.get('_order_pos')):
+                slot = int(row['_order_pos'])
+                slot_ctx = {1:"Leadoff",2:"#2 Hitter",3:"#3 Hitter",
+                            4:"Cleanup",5:"#5 Hitter"}.get(slot, f"#{slot} Hitter")
+                slot_color = "var(--hit)" if slot in (3,4,5) else \
+                             "var(--accent)" if slot in (1,2) else "var(--muted)"
+                order_row = (
+                    f'<div class="pcard-row"><span class="pk">Lineup Slot</span>'
+                    f'<span class="pv" style="color:{slot_color}">#{slot} — {slot_ctx}</span></div>'
+                )
+
+            # Rolling form badge
+            form_row = ""
+            if '_form_label' in slate_df.columns and pd.notna(row.get('_form_label')):
+                flabel = row['_form_label']
+                frate  = row.get('_form_rate')
+                fcolor = "var(--hit)" if '🔥' in str(flabel) else "var(--hr)"
+                frate_str = f" ({frate:.2f} H/G)" if pd.notna(frate) else ""
+                form_row = (
+                    f'<div class="pcard-row"><span class="pk">7-Day Form</span>'
+                    f'<span class="pv" style="color:{fcolor}">'
+                    f'{flabel}{frate_str}</span></div>'
+                )
+
             cards_html += f"""
             <div class="pcard {css}">
               <div class="pcard-header">
@@ -681,7 +726,7 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
                 <span class="pv {hr_cls}">{hr_lg:+.2f}%</span></div>
               <div class="pcard-row"><span class="pk">vs Grade</span>
                 <span class="pv">{int(row['vs Grade'])}</span></div>
-              {sc_row}{park_row}{hist_row}
+              {order_row}{form_row}{sc_row}{park_row}{hist_row}
             </div>"""
 
         cards_html += '</div>'

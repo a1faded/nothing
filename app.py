@@ -1,14 +1,12 @@
 """
-app.py — A1PICKS MLB Hit Predictor V5.3
-==========================================
-V5.3: Statcast enrichment now uses MLBAM IDs (reliable) not just names (fragile).
-
-After _build_scored_df() (which does a name-based Statcast join), we now call
-enrich_slate_with_statcast(df, player_id_map) which fills any remaining NaN
-Statcast columns using the pre-cached leaderboard dict keyed by MLBAM ID.
-
-This means players whose BallPark Pal names don't match FanGraphs names
-(accents, Jr./Sr., hyphens) still get their Barrel%, HH%, xBA etc.
+app.py — A1PICKS MLB Hit Predictor V7
+======================================
+New in V7:
+  - Auto cache invalidation when GitHub detects new Matchups.csv commit
+  - Slate staleness warning banner
+  - Confirmed lineup filter (sidebar toggle)
+  - New signal data (order_map, form_map, handedness_map) fetched once,
+    passed into compute_scores()
 """
 
 import streamlit as st
@@ -28,25 +26,28 @@ from renders import (render_header, render_stat_bar, render_score_summary_cards,
                      render_pitcher_landscape, render_park_notice,
                      render_game_conditions_panel, render_results_table,
                      render_best_per_target, render_visualizations,
-                     render_player_deep_dive)
+                     render_player_deep_dive, render_staleness_warning)
 from player_profile import player_profile_page
 from parlay import parlay_page
 from reference import info_page
 from loader import (load_matchups, load_pitcher_data, load_game_conditions,
                     load_pitcher_qs, merge_pitcher_data, merge_game_conditions)
 from engine import (compute_metrics, compute_scores, compute_game_condition_scores)
+from helpers import should_auto_invalidate
 
 inject_css()
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# SHARED DATA PIPELINE
+# DATA PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
-                     use_park: bool = True, use_gc: bool = True):
+                     use_park=True, use_gc=True,
+                     order_map=None, form_map=None, handedness_map=None):
     """
-    Single scoring pipeline. Includes Tier-1 name-based Statcast join.
-    Gaps filled by enrich_slate_with_statcast() (Tier-2, ID-based) afterward.
+    Full scoring pipeline. New signal dicts are optional — all default to {}
+    so the pipeline degrades gracefully when API data is unavailable.
     """
     df = compute_metrics(raw_df, use_park=use_park)
     df = merge_pitcher_data(df, pitcher_df)
@@ -55,28 +56,24 @@ def _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
         df = join_statcast_to_slate(df)
     except Exception:
         pass
-    df = compute_scores(df)
+    df = compute_scores(df,
+                        order_map=order_map or {},
+                        form_map=form_map or {},
+                        handedness_map=handedness_map or {})
     df = merge_game_conditions(df, game_cond, qs_df)
     df = compute_game_condition_scores(df, use_gc=use_gc)
     return df
 
 
 def _get_player_id_map(df) -> dict:
-    """Build batter → MLBAM ID map. Cached 1h in mlb_api."""
     try:
         from mlb_api import build_player_id_map
-        names = tuple(sorted(df['Batter'].unique().tolist()))
-        return build_player_id_map(names)
+        return build_player_id_map(tuple(sorted(df['Batter'].unique().tolist())))
     except Exception:
         return {}
 
 
-def _enrich_with_ids(df, player_id_map: dict):
-    """
-    Tier-2 Statcast enrichment using MLBAM IDs.
-    Fills any NaN Statcast columns that the name-based join missed.
-    Returns enriched df (or original if enrich fails).
-    """
+def _enrich_with_ids(df, player_id_map):
     if not player_id_map:
         return df
     try:
@@ -85,12 +82,39 @@ def _enrich_with_ids(df, player_id_map: dict):
     except Exception:
         return df
 
+
+def _fetch_signal_data() -> tuple[dict, dict, dict]:
+    """
+    Fetch all three new signal dicts in parallel-ish order.
+    Returns (order_map, form_map, handedness_map).
+    Any failure returns {} for that signal — graceful degradation.
+    """
+    order_map, form_map, handedness_map = {}, {}, {}
+    try:
+        from mlb_api import (get_batting_order_map,
+                             get_recent_batting_form,
+                             get_pitcher_handedness_map)
+        order_map      = get_batting_order_map()
+        form_map       = get_recent_batting_form(days=7)
+        handedness_map = get_pitcher_handedness_map()
+    except Exception:
+        pass
+    return order_map, form_map, handedness_map
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PREDICTOR PAGE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main_page():
     render_header()
+
+    # ── Auto-invalidation check ───────────────────────────────────────────────
+    if should_auto_invalidate():
+        st.rerun()
+
+    # ── Staleness warning ─────────────────────────────────────────────────────
+    render_staleness_warning()
 
     with st.spinner("⚾ Loading today's matchups…"):
         raw_df     = load_matchups()
@@ -104,17 +128,30 @@ def main_page():
 
         filters = build_filters(raw_df)
 
+        # Fetch signal data (batting order, form, handedness)
+        order_map, form_map, handedness_map = _fetch_signal_data()
+
         df = _build_scored_df(
             raw_df, pitcher_df, game_cond, qs_df,
             use_park=filters['use_park'],
             use_gc=filters.get('use_gc', True),
+            order_map=order_map,
+            form_map=form_map,
+            handedness_map=handedness_map,
         )
 
-        # Build player ID map and enrich df with ID-based Statcast data
         player_id_map = _get_player_id_map(df)
         df = _enrich_with_ids(df, player_id_map)
 
-    # Promote GC score column when active
+    # ── Apply confirmed lineup filter if toggled ───────────────────────────────
+    if filters.get('confirmed_only') and order_map:
+        confirmed_batters = set(order_map.keys())
+        pre_count = len(df)
+        df = df[df['Batter'].isin(confirmed_batters)]
+        if len(df) < pre_count:
+            st.info(f"📋 Showing {len(df)} confirmed-lineup batters "
+                    f"({pre_count - len(df)} unconfirmed hidden)")
+
     if filters.get('use_gc', False):
         gc_col = filters['score_col'] + '_gc'
         if gc_col in df.columns:
@@ -132,16 +169,11 @@ def main_page():
     render_score_summary_cards(slate_df, filters)
 
     target_labels = {
-        'Hit_Score':       '🎯 Any Base Hit',
-        'Single_Score':    '1️⃣ Single',
-        'XB_Score':        '🔥 Extra Base Hit',
-        'HR_Score':        '💣 Home Run',
-        'Hit_Score_gc':    '🎯 Any Base Hit ⛅',
-        'Single_Score_gc': '1️⃣ Single ⛅',
-        'XB_Score_gc':     '🔥 Extra Base Hit ⛅',
-        'HR_Score_gc':     '💣 Home Run ⛅',
+        'Hit_Score':'🎯 Any Base Hit','Single_Score':'1️⃣ Single',
+        'XB_Score':'🔥 Extra Base Hit','HR_Score':'💣 Home Run',
+        'Hit_Score_gc':'🎯 Any Base Hit ⛅','Single_Score_gc':'1️⃣ Single ⛅',
+        'XB_Score_gc':'🔥 Extra Base Hit ⛅','HR_Score_gc':'💣 Home Run ⛅',
     }
-
     display_sc = filters['score_col_base']
     st.markdown(f"""
     <div class="result-head">
@@ -149,8 +181,7 @@ def main_page():
         {target_labels.get(filters['score_col'], target_labels.get(display_sc,'Hit'))} Candidates
       </span>
       <span class="rh-count">{len(filtered_df)} results</span>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     render_results_table(filtered_df, filters)
     render_best_per_target(slate_df, filters)
@@ -171,14 +202,19 @@ def main_page():
                 "💾 Export CSV",
                 filtered_df.to_csv(index=False),
                 f"a1picks_mlb_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NAVIGATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    # Auto-invalidation runs on every page load
+    if should_auto_invalidate():
+        st.rerun()
+
     st.sidebar.markdown("---")
     if st.sidebar.checkbox("🎵 Music"):
         audio_url = (
@@ -188,13 +224,13 @@ def main():
         components.html(
             f'<audio controls autoplay loop style="width:100%;">'
             f'<source src="{audio_url}" type="audio/mpeg"></audio>',
-            height=55
+            height=55,
         )
 
     page = st.sidebar.radio(
         "Navigate",
-        ["⚾ Predictor", "👤 Player Profile", "⚡ Parlay Builder", "📚 Reference Manual"],
-        index=0
+        ["⚾ Predictor","👤 Player Profile","⚡ Parlay Builder","📚 Reference Manual"],
+        index=0,
     )
 
     raw_df     = load_matchups()
@@ -206,26 +242,31 @@ def main():
         main_page()
 
     elif page == "👤 Player Profile":
+        render_staleness_warning()
         if raw_df is None:
             st.error("❌ Could not load Matchups data.")
         else:
             with st.spinner("Loading slate data…"):
+                order_map, form_map, handedness_map = _fetch_signal_data()
                 df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
-                                      use_park=True, use_gc=True)
+                                      use_park=True, use_gc=True,
+                                      order_map=order_map, form_map=form_map,
+                                      handedness_map=handedness_map)
                 player_id_map = _get_player_id_map(df)
                 df = _enrich_with_ids(df, player_id_map)
-            filters = {
-                'use_gc': True, 'use_park': True,
-                'score_col': 'Hit_Score', 'score_col_base': 'Hit_Score',
-            }
+            filters = {'use_gc':True,'use_park':True,
+                       'score_col':'Hit_Score','score_col_base':'Hit_Score'}
             player_profile_page(df, player_id_map, filters)
 
     elif page == "⚡ Parlay Builder":
         if raw_df is None:
             st.error("❌ Could not load data for Parlay Builder.")
         else:
+            order_map, form_map, handedness_map = _fetch_signal_data()
             df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
-                                  use_park=True, use_gc=True)
+                                  use_park=True, use_gc=True,
+                                  order_map=order_map, form_map=form_map,
+                                  handedness_map=handedness_map)
             excl = st.session_state.get('excluded_players', [])
             if excl:
                 df = df[~df['Batter'].isin(excl)]
@@ -236,7 +277,7 @@ def main():
 
     render_lineup_status_sidebar()
     st.sidebar.markdown("---")
-    st.sidebar.caption("V5.3 · BallPark Pal + MLB Stats API + Statcast")
+    st.sidebar.caption("V7 · BallPark Pal + MLB Stats API + Statcast")
 
 
 if __name__ == "__main__":

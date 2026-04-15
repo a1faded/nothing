@@ -18,6 +18,39 @@ from config import CONFIG
 from helpers import grade_pill, style_grade_cell, data_freshness_badge
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STALENESS WARNING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_staleness_warning():
+    """
+    Show a loud warning banner when the loaded slate is from a previous day.
+    Reads st.session_state['slate_stale'] set by loader.load_matchups().
+    """
+    if not st.session_state.get('slate_stale', False):
+        return
+
+    slate_date = st.session_state.get('slate_date', 'unknown date')
+    st.markdown(f"""
+    <div style="background:#1c0000;border:2px solid #ef4444;border-radius:10px;
+                padding:.85rem 1.2rem;margin:.5rem 0;display:flex;align-items:center;gap:.8rem;">
+      <span style="font-size:1.4rem">⚠️</span>
+      <div>
+        <div style="font-weight:700;color:#f87171;font-size:.9rem">
+          Stale Data Detected — Slate from {slate_date}
+        </div>
+        <div style="color:#fca5a5;font-size:.78rem;margin-top:.2rem">
+          Today's Matchups.csv has not been uploaded yet. All scores reflect yesterday's
+          slate. Do not place bets until today's data is loaded.
+        </div>
+      </div>
+      <div style="margin-left:auto;font-size:.72rem;color:#f87171">
+        Hit 🔄 Refresh when today's file is ready
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def _score_tier(score: float) -> tuple[str, str]:
     """Return (label, css_color) for a 0-100 score."""
     if score >= 75: return "ELITE",    "#4ade80"

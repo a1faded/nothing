@@ -3,6 +3,12 @@ data/loader.py — BallPark Pal CSV loading
 ==========================================
 All data fetching from GitHub-hosted CSVs.
 When BallPark Pal API is ready, swap these functions out here only.
+
+FIX V5.2: Pitcher matching now handles last-name collisions correctly.
+  - load_pitcher_data() no longer blindly drop_duplicates on last_name.
+    Instead it tags rows whose last name appears more than once as ambiguous.
+  - merge_pitcher_data() returns neutral multipliers for ambiguous names
+    rather than silently applying the wrong pitcher's stats.
 """
 
 import streamlit as st
@@ -11,7 +17,6 @@ import numpy as np
 import requests
 from io import StringIO
 from config import CONFIG, PARK_TO_TEAM, NICK_TO_ABBR
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BASE FETCHER
@@ -27,7 +32,6 @@ def _fetch_csv(url: str, label: str):
         st.warning(f"⚠️ Could not load {label}: {e}")
         return None
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # MATCHUPS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,6 +41,7 @@ def load_matchups():
     df = _fetch_csv(CONFIG['matchups_url'], "Matchups")
     if df is None:
         return None
+
     required = [
         'Game', 'Team', 'Batter', 'Pitcher',
         'HR Prob', 'XB Prob', '1B Prob', 'BB Prob', 'K Prob',
@@ -47,10 +52,10 @@ def load_matchups():
     if missing:
         st.error(f"❌ Matchups CSV missing columns: {missing}")
         return None
+
     for col in ['Team', 'Batter', 'Pitcher', 'Game']:
         df[col] = df[col].astype(str).str.strip()
     return df
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PITCHER DATA
@@ -93,11 +98,11 @@ def load_pitcher_data():
     merged['walk3_prob'] = merged['walk3_prob'].fillna(CONFIG['pitcher_walk_neutral'])
 
     M = CONFIG['pitcher_max_mult']
-    merged['pitch_hit_mult'] = (1.0 + np.clip(
-        (merged['hit8_prob']  - CONFIG['pitcher_hit_neutral'])  / 4.0 * M, -M, M)).round(4)
-    merged['pitch_hr_mult']  = (1.0 + np.clip(
-        (merged['hr2_prob']   - CONFIG['pitcher_hr_neutral'])   / 8.0 * M, -M, M)).round(4)
-    merged['pitch_walk_pen'] = (0.0 - np.clip(
+    merged['pitch_hit_mult']  = (1.0 + np.clip(
+        (merged['hit8_prob']  - CONFIG['pitcher_hit_neutral'])  / 4.0  * M, -M, M)).round(4)
+    merged['pitch_hr_mult']   = (1.0 + np.clip(
+        (merged['hr2_prob']   - CONFIG['pitcher_hr_neutral'])   / 8.0  * M, -M, M)).round(4)
+    merged['pitch_walk_pen']  = (0.0 - np.clip(
         (merged['walk3_prob'] - CONFIG['pitcher_walk_neutral']) / 10.0 * (M * 0.5),
         -(M * 0.5), (M * 0.5))).round(4)
 
@@ -106,33 +111,61 @@ def load_pitcher_data():
         [composite >= 1.04, composite >= 1.01, composite >= 0.98, composite >= 0.95],
         ['A+', 'A', 'B', 'C'], default='D'
     )
-    return merged.drop_duplicates(subset='last_name').reset_index(drop=True)
+
+    # ── FIX: tag ambiguous last names instead of silently dropping one ────────
+    name_counts = merged['last_name'].value_counts()
+    merged['_ambiguous'] = merged['last_name'].map(name_counts) > 1
+
+    # Drop full-name exact duplicates (same pitcher listed twice), but keep
+    # rows where two *different* pitchers share a last name.
+    merged = merged.drop_duplicates(subset='full_name').reset_index(drop=True)
+
+    return merged
 
 
 def merge_pitcher_data(df: pd.DataFrame, pitcher_df) -> pd.DataFrame:
+    """
+    Join pitcher multipliers onto the slate DataFrame.
+
+    Ambiguous last names (two different pitchers share the same last name)
+    → neutral multipliers rather than silently using the wrong pitcher's data.
+    """
+    neutral = {
+        'pitch_hit_mult':  1.0,
+        'pitch_hr_mult':   1.0,
+        'pitch_walk_pen':  0.0,
+        'pitch_grade':     'B',
+        'hit8_prob':       CONFIG['pitcher_hit_neutral'],
+        'hr2_prob':        CONFIG['pitcher_hr_neutral'],
+        'walk3_prob':      CONFIG['pitcher_walk_neutral'],
+    }
+
     if pitcher_df is None or pitcher_df.empty:
-        df['pitch_hit_mult']  = 1.0
-        df['pitch_hr_mult']   = 1.0
-        df['pitch_walk_pen']  = 0.0
-        df['pitch_grade']     = 'B'
-        df['hit8_prob']       = CONFIG['pitcher_hit_neutral']
-        df['hr2_prob']        = CONFIG['pitcher_hr_neutral']
-        df['walk3_prob']      = CONFIG['pitcher_walk_neutral']
+        for col, val in neutral.items():
+            df[col] = val
         return df
-    pm = pitcher_df.set_index('last_name')
 
-    def _g(p, col, default):
-        return pm.at[p, col] if p in pm.index else default
+    # Build lookup dicts — one entry per last_name only when unambiguous
+    unambiguous = pitcher_df[~pitcher_df['_ambiguous']]
+    pm = unambiguous.set_index('last_name')
 
-    df['pitch_hit_mult']  = df['Pitcher'].apply(lambda p: _g(p, 'pitch_hit_mult', 1.0))
-    df['pitch_hr_mult']   = df['Pitcher'].apply(lambda p: _g(p, 'pitch_hr_mult', 1.0))
-    df['pitch_walk_pen']  = df['Pitcher'].apply(lambda p: _g(p, 'pitch_walk_pen', 0.0))
-    df['pitch_grade']     = df['Pitcher'].apply(lambda p: _g(p, 'pitch_grade', 'B'))
-    df['hit8_prob']       = df['Pitcher'].apply(lambda p: _g(p, 'hit8_prob', CONFIG['pitcher_hit_neutral']))
-    df['hr2_prob']        = df['Pitcher'].apply(lambda p: _g(p, 'hr2_prob', CONFIG['pitcher_hr_neutral']))
-    df['walk3_prob']      = df['Pitcher'].apply(lambda p: _g(p, 'walk3_prob', CONFIG['pitcher_walk_neutral']))
+    # Set of ambiguous last names so we can return neutral for them
+    ambiguous_names = set(pitcher_df.loc[pitcher_df['_ambiguous'], 'last_name'])
+
+    def _g(pitcher_last, col, default):
+        if pitcher_last in ambiguous_names:
+            return default   # two pitchers with same last name — can't tell which
+        return pm.at[pitcher_last, col] if pitcher_last in pm.index else default
+
+    df['pitch_hit_mult']  = df['Pitcher'].apply(lambda p: _g(p, 'pitch_hit_mult',  neutral['pitch_hit_mult']))
+    df['pitch_hr_mult']   = df['Pitcher'].apply(lambda p: _g(p, 'pitch_hr_mult',   neutral['pitch_hr_mult']))
+    df['pitch_walk_pen']  = df['Pitcher'].apply(lambda p: _g(p, 'pitch_walk_pen',  neutral['pitch_walk_pen']))
+    df['pitch_grade']     = df['Pitcher'].apply(lambda p: _g(p, 'pitch_grade',     neutral['pitch_grade']))
+    df['hit8_prob']       = df['Pitcher'].apply(lambda p: _g(p, 'hit8_prob',       neutral['hit8_prob']))
+    df['hr2_prob']        = df['Pitcher'].apply(lambda p: _g(p, 'hr2_prob',        neutral['hr2_prob']))
+    df['walk3_prob']      = df['Pitcher'].apply(lambda p: _g(p, 'walk3_prob',      neutral['walk3_prob']))
+
     return df
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GAME CONDITIONS
@@ -148,12 +181,13 @@ def _clean_prob_col(series: pd.Series) -> pd.Series:
 @st.cache_data(ttl=CONFIG['cache_ttl'])
 def load_game_conditions():
     files = {
-        'hr4_prob':    CONFIG['game_4hr_url'],
-        'hits20_prob': CONFIG['game_20hits_url'],
-        'k20_prob':    CONFIG['game_20k_url'],
-        'walks8_prob': CONFIG['game_8walks_url'],
-        'runs10_prob': CONFIG['game_10runs_url'],
+        'hr4_prob':   CONFIG['game_4hr_url'],
+        'hits20_prob':CONFIG['game_20hits_url'],
+        'k20_prob':   CONFIG['game_20k_url'],
+        'walks8_prob':CONFIG['game_8walks_url'],
+        'runs10_prob':CONFIG['game_10runs_url'],
     }
+
     frames = {}
     for col_name, url in files.items():
         df = _fetch_csv(url, col_name)
@@ -171,11 +205,11 @@ def load_game_conditions():
         merged = frame if merged is None else merged.merge(frame, on='home_team', how='outer')
 
     defaults = {
-        'hr4_prob':    CONFIG['gc_hr4_anchor'],
-        'hits20_prob': CONFIG['gc_hits20_anchor'],
-        'k20_prob':    CONFIG['gc_k20_anchor'],
-        'walks8_prob': CONFIG['gc_walks8_anchor'],
-        'runs10_prob': CONFIG['gc_runs10_anchor'],
+        'hr4_prob':   CONFIG['gc_hr4_anchor'],
+        'hits20_prob':CONFIG['gc_hits20_anchor'],
+        'k20_prob':   CONFIG['gc_k20_anchor'],
+        'walks8_prob':CONFIG['gc_walks8_anchor'],
+        'runs10_prob':CONFIG['gc_runs10_anchor'],
     }
     for col, default in defaults.items():
         if col in merged.columns:
@@ -219,11 +253,11 @@ def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFra
     if game_cond is not None and not game_cond.empty:
         gmap = game_cond.set_index('home_team')
         col_map = {
-            'hr4_prob':    'gc_hr4',
-            'hits20_prob': 'gc_hits20',
-            'k20_prob':    'gc_k20',
-            'walks8_prob': 'gc_walks8',
-            'runs10_prob': 'gc_runs10',
+            'hr4_prob':   'gc_hr4',
+            'hits20_prob':'gc_hits20',
+            'k20_prob':   'gc_k20',
+            'walks8_prob':'gc_walks8',
+            'runs10_prob':'gc_runs10',
         }
         for src_col, dst_col in col_map.items():
             if src_col in gmap.columns:
@@ -231,7 +265,7 @@ def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFra
 
     df['gc_qs'] = CONFIG['gc_qs_anchor']
     if pitcher_qs is not None and not pitcher_qs.empty:
-        qs_map = pitcher_qs.set_index('last_name')['qs_prob']
+        qs_map    = pitcher_qs.set_index('last_name')['qs_prob']
         df['gc_qs'] = df['Pitcher'].map(qs_map).fillna(CONFIG['gc_qs_anchor'])
 
     df.drop(columns=['_home_nick', '_home_abbr'], inplace=True, errors='ignore')

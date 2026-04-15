@@ -96,15 +96,14 @@ def _merge_signal_metadata(df, order_map: dict, form_map: dict,
       _pitcher_hand 'L' / 'R' / None
     """
     from config import CONFIG as _cfg
-    df = df.copy()
+    HOT  = _cfg['form_hot_threshold']
+    COLD = _cfg['form_cold_threshold']
+    df   = df.copy()
 
     if order_map:
         df['_order_pos'] = df['Batter'].map(order_map)
 
     if form_map:
-        HOT  = _cfg['form_hot_threshold']
-        COLD = _cfg['form_cold_threshold']
-
         def _label(name):
             info = form_map.get(name)
             if not info or info.get('games', 0) < 3:
@@ -150,10 +149,6 @@ def _fetch_signal_data() -> tuple[dict, dict, dict]:
 
 def main_page():
     render_header()
-
-    # ── Auto-invalidation check ───────────────────────────────────────────────
-    if should_auto_invalidate():
-        st.rerun()
 
     # ── Staleness warning ─────────────────────────────────────────────────────
     render_staleness_warning()

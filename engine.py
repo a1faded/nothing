@@ -113,7 +113,7 @@ def _compute_xba_luck_adj(df: pd.DataFrame) -> pd.Series:
 def _compute_order_adj(df: pd.DataFrame, order_map: dict,
                        score_type: str) -> pd.Series:
     """
-    Batting order position signal. Only active when confirmed lineup available.
+    Batting order position signal — vectorized via map() not iterrows().
     Cleanup (3-5): bonus on HR/XB.  Leadoff (1-2): bonus on Hit/Single.
     """
     cfg    = CONFIG
@@ -123,15 +123,16 @@ def _compute_order_adj(df: pd.DataFrame, order_map: dict,
     if not order_map:
         return result
 
-    for idx, row in df.iterrows():
-        batter   = row.get('Batter','')
-        position = order_map.get(batter)
-        if position is None:
-            continue
-        if score_type in ('HR','XB') and 3 <= position <= 5:
-            result[idx] = cfg['order_cleanup_bonus']
-        elif score_type in ('Hit','Single') and 1 <= position <= 2:
-            result[idx] = cfg['order_leadoff_bonus']
+    positions = df['Batter'].map(order_map)   # Series of int or NaN
+
+    if score_type in ('HR', 'XB'):
+        result = positions.apply(
+            lambda p: cfg['order_cleanup_bonus'] if pd.notna(p) and 3 <= int(p) <= 5 else 0.0
+        )
+    elif score_type in ('Hit', 'Single'):
+        result = positions.apply(
+            lambda p: cfg['order_leadoff_bonus'] if pd.notna(p) and 1 <= int(p) <= 2 else 0.0
+        )
 
     return result.clip(-MAX, MAX)
 
@@ -143,9 +144,8 @@ def _compute_order_adj(df: pd.DataFrame, order_map: dict,
 def _compute_form_adj(df: pd.DataFrame, form_map: dict,
                       score_type: str) -> pd.Series:
     """
-    Recent hitting form (H/G last 7 days) adjustment.
-    Applied to Hit/Single only — recency matters most for contact props.
-    Applied mildly to HR/XB (0.5×) as hot hitters do tend to stay hot.
+    Recent hitting form (H/G last 7 days) — vectorized via map().
+    Applied to all scores; weight varies by score type.
     """
     cfg    = CONFIG
     MAX    = cfg['form_max_adj']
@@ -156,22 +156,18 @@ def _compute_form_adj(df: pd.DataFrame, form_map: dict,
     if not form_map:
         return result
 
-    # Multiplier per score type — form matters more for hit/single
     mult = {'Hit':1.0, 'Single':1.0, 'XB':0.5, 'HR':0.35}.get(score_type, 0.5)
 
-    for idx, row in df.iterrows():
-        batter = row.get('Batter','')
-        info   = form_map.get(batter)
-        if info is None:
-            continue
+    def _form_pts(name):
+        info = form_map.get(name)
+        if not info or info.get('games', 0) < 3:
+            return 0.0
         rate = info.get('hit_rate', 0)
-        if info.get('games', 0) < 3:   # too few games to be meaningful
-            continue
-        if rate >= HOT:
-            result[idx] = cfg['form_hot_bonus'] * mult
-        elif rate <= COLD:
-            result[idx] = cfg['form_cold_penalty'] * mult
+        if rate >= HOT:  return cfg['form_hot_bonus']   * mult
+        if rate <= COLD: return cfg['form_cold_penalty'] * mult
+        return 0.0
 
+    result = df['Batter'].apply(_form_pts)
     return result.clip(-MAX, MAX)
 
 
@@ -185,47 +181,29 @@ def _compute_form_adj(df: pd.DataFrame, form_map: dict,
 def _compute_platoon_adj(df: pd.DataFrame,
                          handedness_map: dict) -> pd.Series:
     """
-    Platoon advantage: opposite-hand batter vs pitcher = bonus.
-    Same-hand = penalty.
-
-    Batter hand is inferred from the 'Batter' column via a heuristic
-    (most MLB batters are R; L and S batters require lookup, which we
-    don't have in the current data). We use a conservative approach:
-    only apply a penalty for same-hand, not a bonus for opposite.
-    That way we don't reward unknown platoon situations.
-
-    NOTE: Disable via CONFIG['use_platoon'] = False if BallPark Pal
-    already incorporates handedness splits in their 3000-sim model.
+    Platoon advantage — vectorized via apply().
+    Conservative: only fires when BOTH pitcher and batter handedness are known.
+    batter_hand_map is empty until batter-side lookup is added to mlb_api.
     """
     cfg    = CONFIG
     if not cfg.get('use_platoon', True) or not handedness_map:
         return pd.Series(0.0, index=df.index)
 
-    MAX    = cfg['platoon_max_adj']
-    result = pd.Series(0.0, index=df.index)
+    MAX              = cfg['platoon_max_adj']
+    batter_hand_map  : dict = {}   # {batter_name: 'L'/'R'/'S'} — wire when available
 
-    # Batter handedness — we don't have this in the slate data currently.
-    # Rather than guessing, we apply a conservative neutral for unknown batters.
-    # When batter handedness data becomes available (e.g. from mlb_api),
-    # replace this dict with the actual lookup.
-    # For now, this function is wired but conservative.
-    batter_hand_map: dict = {}   # {batter_name: 'L'/'R'/'S'} — populate when available
-
-    for idx, row in df.iterrows():
-        pitcher_last = row.get('Pitcher','')
-        p_hand       = handedness_map.get(pitcher_last)
-        b_hand       = batter_hand_map.get(row.get('Batter',''))
-
+    def _platoon_pts(row):
+        p_hand = handedness_map.get(row.get('Pitcher',''))
+        b_hand = batter_hand_map.get(row.get('Batter',''))
         if not p_hand or not b_hand:
-            continue   # unknown → neutral, no guess
+            return 0.0
+        if b_hand == 'S':
+            return cfg['platoon_bonus']
+        if b_hand != p_hand:
+            return cfg['platoon_bonus']
+        return cfg['platoon_penalty']
 
-        if b_hand == 'S':   # switch hitter — always has advantage
-            result[idx] = cfg['platoon_bonus']
-        elif b_hand != p_hand:   # opposite hand — platoon advantage
-            result[idx] = cfg['platoon_bonus']
-        else:                     # same hand — disadvantage
-            result[idx] = cfg['platoon_penalty']
-
+    result = df.apply(_platoon_pts, axis=1)
     return result.clip(-MAX, MAX)
 
 

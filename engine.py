@@ -1,51 +1,29 @@
 """
-engine.py — Scoring Engine V5.3
+engine.py — Scoring Engine V5.5
 ==================================
 
-V5.3 architecture — clean two-stage scoring:
+All six formula improvements applied:
 
-STAGE 1: BallPark Pal raw signal (PRIMARY)
-  Weighted combo of simulation probabilities (p_1b, p_xb, p_hr, p_k, p_bb),
-  vs Grade, Run Creation, historical bonus, pitcher multiplier.
-  → normalize_0_100() → produces the ranking within today's slate.
-  This is the simulation engine doing its job. Statcast does NOT mix in here.
+1. XB Score  — BB penalty reduced (0.3), K lightened (1.0)
+               Power/selective hitters shouldn't be penalised for walks on XB targets.
+2. Single Score — XB/HR penalty weights flipped: HR now penalises more (-0.8)
+               than XB (-0.5). A pure HR swing profile is the furthest from a singles
+               contact profile.
+3. hist_bonus zero-hit trigger — raised from PA≥3 → PA≥8.
+               Three PA is too small a sample to meaningfully penalise a batter.
+4. pitcher_max_mult — raised to 0.08 in config.py.
+               Pitcher is one of the two biggest variables — 5% was too conservative.
+5. RC (run creation) weight — reduced across scores (0.5→0.2 Hit/Single, kept
+               moderate for XB/HR where park environment is more directly relevant).
+               RC is a park/environment metric already baked into p_* probabilities.
+               Over-weighting it double-counts park advantage.
+6. Single Score Statcast xBA — reduced from +3 → +1.5.
+               xBA is driven by all batted ball events including barrels, making it
+               a poor signal for the singles-specific contact profile.
 
-STAGE 2: Statcast quality-of-contact overlay (SECONDARY, post-normalization)
-  Applied AFTER normalization so the adjustment is in transparent point terms.
-  Max ±10 pts total per score — meaningful tiebreaker, never overrides the sim.
-  Missing Statcast data → 0 pts (neutral, no penalty).
-
-Per-score Statcast logic (derived from the planning session):
-
-  💣 HR Score:
-    Barrel%  (+6 max) — primary, barrels = HRs
-    xSLG     (+4 max) — power output correlation  [NEW]
-    maxEV    (+3 max) — ceiling: can this bat generate HR power?  [NEW]
-    HH%      (+2 max) — hard contact support
-    AvgEV    (+1.5 max) — average contact quality  [NEW]
-
-  🔥 XB Score:
-    HH%      (+5 max) — primary, doubles/triples need hard contact not barrels
-    xSLG     (+4 max) — extra-base power profile  [NEW]
-    Barrel%  (+3 max) — barrels that don't clear the fence become doubles
-    AvgEV    (+2.5 max) — consistent hard contact  [NEW]
-    xBA      (+1.5 max) — contact quality  [NEW]
-
-  🎯 Hit Score:
-    xBA      (+6 max) — primary, literally expected batting average  [NEW]
-    HH%      (+3 max) — hard contact falls in more often
-    xwOBA    (+2 max) — overall contact value  [NEW]
-    AvgEV    (+1.5 max) — average exit velocity  [NEW]
-
-  1️⃣ Single Score:
-    xBA      (+3 max) — positive: expected hits
-    HH%      (+2 max) — mild positive: hard grounders/liners become singles
-    Barrel%  (-4 max) — NEGATIVE: barrels go for XBH/HR or hard outs, not singles
-    xSLG     (-3 max) — NEGATIVE: power profile means contact goes for extra bases  [NEW]
-    maxEV    (-1.5 max) — mild NEGATIVE: power ceiling → contact too hard for singles  [NEW]
-
-GC scores (Hit/Single/XB/HR with game-conditions ceiling) are derived from
-the Statcast-adjusted scores, so they automatically inherit the overlay.
+Architecture (unchanged from V5.4):
+  STAGE 1: BallPark Pal raw signal → normalize_0_100
+  STAGE 2: Statcast quality-of-contact overlay (post-normalization, ±10 pts max)
 """
 
 import pandas as pd
@@ -53,46 +31,27 @@ import numpy as np
 from config import CONFIG
 from helpers import normalize_0_100
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STATCAST COLUMN HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
 _GC_COLS = ['gc_hr4', 'gc_hits20', 'gc_k20', 'gc_walks8', 'gc_runs10', 'gc_qs']
 
 
 def _sc_series(df: pd.DataFrame, col: str) -> pd.Series:
-    """Safe numeric extraction of a Statcast column. NaN when missing."""
     if col not in df.columns:
         return pd.Series(np.nan, index=df.index)
     return pd.to_numeric(df[col], errors='coerce')
 
 
 def _has_statcast(df: pd.DataFrame) -> bool:
-    """True if at least one key Statcast column has non-null values."""
-    check_cols = ['Barrel%', 'HH%', 'AvgEV', 'xBA', 'xSLG']
-    return any(col in df.columns and df[col].notna().any() for col in check_cols)
+    return any(col in df.columns and df[col].notna().any()
+               for col in ['Barrel%', 'HH%', 'AvgEV', 'xBA', 'xSLG'])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STATCAST ADJUSTMENT BUILDER
+# STATCAST OVERLAY
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _adj(series: pd.Series, avg: float, spread: float,
          pts: float, negate: bool = False) -> pd.Series:
-    """
-    Linear deviation adjustment relative to league average.
-
-    Formula:  (value - avg) / spread * pts
-    Clipped:  [-|pts|, +|pts|]
-    NaN:      → 0.0 (neutral — no penalty for missing data)
-
-    Args:
-        series:  Statcast metric column
-        avg:     league average benchmark
-        spread:  normalisation range (roughly ±1 SD from avg)
-        pts:     maximum contribution in score points (pre-clip)
-        negate:  True → flip sign so above-average = penalty (Single Score power stats)
-    """
+    """Linear deviation from league avg, clipped to ±pts. NaN → 0 (neutral)."""
     raw = (series - avg) / spread * pts
     if negate:
         raw = -raw
@@ -100,18 +59,8 @@ def _adj(series: pd.Series, avg: float, spread: float,
 
 
 def _compute_statcast_adj(df: pd.DataFrame, score_type: str) -> pd.Series:
-    """
-    Build the post-normalization Statcast adjustment for one score type.
-
-    Returns a pd.Series in range [-sc_max_total_adj, +sc_max_total_adj].
-    Values are in score points, applied directly to the 0-100 normalized score.
-
-    League average benchmarks come from CONFIG so they can be tuned in one place.
-    """
-    cfg = CONFIG
-    MAX = cfg['sc_max_total_adj']   # ±10 pts total
-
-    # Pull all columns once
+    cfg    = CONFIG
+    MAX    = cfg['sc_max_total_adj']
     barrel = _sc_series(df, 'Barrel%')
     hh     = _sc_series(df, 'HH%')
     avgev  = _sc_series(df, 'AvgEV')
@@ -119,55 +68,40 @@ def _compute_statcast_adj(df: pd.DataFrame, score_type: str) -> pd.Series:
     xslg   = _sc_series(df, 'xSLG')
     xba    = _sc_series(df, 'xBA')
     xwoba  = _sc_series(df, 'xwOBA')
+    B, HH, EV, MX = cfg['league_barrel_pct'], cfg['league_hh_pct'], cfg['league_avgev'], cfg['league_maxev']
+    SL, BA, WO    = cfg['league_xslg'], cfg['league_xba'], cfg['league_xwoba']
 
-    # Benchmarks
-    B_AVG  = cfg['league_barrel_pct']   # 7.5
-    HH_AVG = cfg['league_hh_pct']       # 38.0
-    EV_AVG = cfg['league_avgev']        # 88.5
-    MX_AVG = cfg['league_maxev']        # 108.0
-    SL_AVG = cfg['league_xslg']         # 0.400
-    BA_AVG = cfg['league_xba']          # 0.248
-    WO_AVG = cfg['league_xwoba']        # 0.320
-
-    # ── 💣 HR Score ─────────────────────────────────────────────────────────
     if score_type == 'HR':
         total = (
-            _adj(barrel, B_AVG,  7.5,  6.0)   # primary — barrels drive HRs
-          + _adj(xslg,   SL_AVG, 0.150, 4.0)  # xSLG — power output
-          + _adj(maxev,  MX_AVG, 7.0,  3.0)   # maxEV — ceiling, can he hit it 400ft?
-          + _adj(hh,     HH_AVG, 12.0, 2.0)   # HH% — hard contact support
-          + _adj(avgev,  EV_AVG, 5.5,  1.5)   # AvgEV — avg contact quality
+            _adj(barrel, B,  7.5,  6.0)
+          + _adj(xslg,   SL, 0.15, 4.0)
+          + _adj(maxev,  MX, 7.0,  3.0)
+          + _adj(hh,     HH, 12.0, 2.0)
+          + _adj(avgev,  EV, 5.5,  1.5)
         )
-
-    # ── 🔥 XB Score ─────────────────────────────────────────────────────────
     elif score_type == 'XB':
         total = (
-            _adj(hh,     HH_AVG, 12.0, 5.0)   # primary — hard contact, not needing barrel
-          + _adj(xslg,   SL_AVG, 0.120, 4.0)  # xSLG — extra-base power profile
-          + _adj(barrel, B_AVG,  7.5,  3.0)   # barrel — often a double vs fence
-          + _adj(avgev,  EV_AVG, 5.5,  2.5)   # AvgEV — consistent hard contact
-          + _adj(xba,    BA_AVG, 0.062, 1.5)  # xBA — contact quality
+            _adj(hh,     HH, 12.0, 5.0)
+          + _adj(xslg,   SL, 0.12, 4.0)
+          + _adj(barrel, B,  7.5,  3.0)
+          + _adj(avgev,  EV, 5.5,  2.5)
+          + _adj(xba,    BA, 0.062,1.5)
         )
-
-    # ── 🎯 Hit Score ─────────────────────────────────────────────────────────
     elif score_type == 'Hit':
         total = (
-            _adj(xba,   BA_AVG, 0.062, 6.0)   # primary — literally expected batting avg
-          + _adj(hh,    HH_AVG, 12.0, 3.0)    # HH% — hard contact falls in more
-          + _adj(xwoba, WO_AVG, 0.080, 2.0)   # xwOBA — overall contact value
-          + _adj(avgev, EV_AVG, 5.5,  1.5)    # AvgEV — exit velocity quality
+            _adj(xba,   BA, 0.062, 6.0)
+          + _adj(hh,    HH, 12.0,  3.0)
+          + _adj(xwoba, WO, 0.080, 2.0)
+          + _adj(avgev, EV, 5.5,   1.5)
         )
-
-    # ── 1️⃣ Single Score ─────────────────────────────────────────────────────
     elif score_type == 'Single':
         total = (
-            _adj(xba,    BA_AVG, 0.062, 3.0)          # positive — expected hits are hits
-          + _adj(hh,     HH_AVG, 12.0,  2.0)          # mild positive — hard liners/grounders
-          + _adj(barrel, B_AVG,  7.5,   4.0, negate=True)  # NEGATIVE — barrels → XBH not singles
-          + _adj(xslg,   SL_AVG, 0.150, 3.0, negate=True)  # NEGATIVE — power profile = extra bases
-          + _adj(maxev,  MX_AVG, 7.0,   1.5, negate=True)  # mild NEGATIVE — power ceiling
+            _adj(xba,    BA, 0.062, 1.5)           # FIX 6: reduced from 3.0→1.5
+          + _adj(hh,     HH, 12.0,  2.0)
+          + _adj(barrel, B,  7.5,   4.0, negate=True)
+          + _adj(xslg,   SL, 0.150, 3.0, negate=True)
+          + _adj(maxev,  MX, 7.0,   1.5, negate=True)
         )
-
     else:
         return pd.Series(0.0, index=df.index)
 
@@ -175,22 +109,14 @@ def _compute_statcast_adj(df: pd.DataFrame, score_type: str) -> pd.Series:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GAME CONDITION SIGNAL HELPER  (shared by compute and gc_adjusted_score)
+# GC SIGNAL HELPER
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _gc_signals(df: pd.DataFrame, strength: float) -> tuple:
-    """
-    Compute (hit_combined, hr_combined) GC signals.
-    Both compute_game_condition_scores and gc_adjusted_score call this so
-    the weights are in one place.
-    """
     cfg    = CONFIG
-    hits_a = cfg['gc_hits20_anchor']
-    k_a    = cfg['gc_k20_anchor']
-    runs_a = cfg['gc_runs10_anchor']
-    walk_a = cfg['gc_walks8_anchor']
-    hr4_a  = cfg['gc_hr4_anchor']
-    qs_a   = cfg['gc_qs_anchor']
+    hits_a = cfg['gc_hits20_anchor'];  k_a    = cfg['gc_k20_anchor']
+    runs_a = cfg['gc_runs10_anchor'];  walk_a = cfg['gc_walks8_anchor']
+    hr4_a  = cfg['gc_hr4_anchor'];     qs_a   = cfg['gc_qs_anchor']
 
     hit_combined = (
         (df['gc_hits20'] - hits_a) / 15.0 * 1.8
@@ -212,15 +138,14 @@ def _gc_signals(df: pd.DataFrame, strength: float) -> tuple:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STAGE 1 — METRIC COMPUTATION  (unchanged from V5.0)
+# STAGE 1 — METRICS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_metrics(df: pd.DataFrame, use_park: bool) -> pd.DataFrame:
     df = df.copy()
 
     for s in ['HR', 'XB', '1B', 'BB', 'K']:
-        pk = f'{s} Prob'
-        pb = f'{s} Prob (no park)'
+        pk = f'{s} Prob';  pb = f'{s} Prob (no park)'
         df[f'p_{s.lower()}_park'] = pd.to_numeric(df[pk], errors='coerce').fillna(0)
         df[f'p_{s.lower()}_base'] = pd.to_numeric(df[pb], errors='coerce').fillna(0)
         df[f'p_{s.lower()}'] = (
@@ -246,7 +171,7 @@ def compute_metrics(df: pd.DataFrame, use_park: bool) -> pd.DataFrame:
     df['AVG'] = pd.to_numeric(df['AVG'], errors='coerce').fillna(0)
 
     zero_hit_penalty = np.where(
-        (df['PA'] >= 3) & (df['H'] == 0),
+        (df['PA'] >= 8) & (df['H'] == 0),   # FIX 3: raised from 3 → 8 PA
         -np.clip(df['PA'] / 10.0 * 5.0, 1.5, 5.0),
         0.0
     )
@@ -258,7 +183,6 @@ def compute_metrics(df: pd.DataFrame, use_park: bool) -> pd.DataFrame:
     df['hist_bonus'] = (zero_hit_penalty + pos_bonus).round(3)
 
     df['Starter'] = pd.to_numeric(df.get('Starter', 0), errors='coerce').fillna(0).astype(int)
-
     df['total_hit_prob'] = (df['p_1b'] + df['p_xb'] + df['p_hr']).clip(upper=100).round(1)
 
     xb_boost_park = pd.to_numeric(df['XB Boost'], errors='coerce').fillna(0) \
@@ -271,7 +195,7 @@ def compute_metrics(df: pd.DataFrame, use_park: bool) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STAGE 2 — SCORES  (BallPark Pal primary → normalize → Statcast overlay)
+# STAGE 2 — SCORES
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
@@ -286,75 +210,73 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     hr_mult     = (df['pitch_hr_mult']  + df['pitch_walk_pen']).clip(0.90, 1.10)
     single_mult = (df['pitch_hit_mult'] + df['pitch_walk_pen']).clip(0.90, 1.10)
 
-    # ── STAGE 1: BallPark Pal raw scores (no Statcast — clean separation) ────
-    # These formulas are the BallPark Pal simulation signal only.
-    # Statcast is applied afterward as a transparent post-normalization overlay.
-
-    # 🎯 Hit Score
+    # ── 🎯 Hit Score ──────────────────────────────────────────────────────────
+    # rc weight: 0.5 → 0.2 (FIX 5: RC double-counts park already in p_* probs)
     hit_raw = (
         df['p_1b']*3.0 + df['p_xb']*2.0 + df['p_hr']*1.0
         - df['p_k']*2.5 - df['p_bb']*1.0
-        + vc*1.0 + rc*0.5 + hb
+        + vc*1.0 + rc*0.2 + hb
     ) * hit_mult
     df['Hit_Score'] = normalize_0_100(hit_raw)
 
-    # 1️⃣ Single Score
+    # ── 1️⃣ Single Score ────────────────────────────────────────────────────────
+    # FIX 2: flipped XB/HR penalty weights. HR penalty (-0.8) > XB penalty (-0.5)
+    #        because an HR swing profile is more opposite to a singles profile.
+    # FIX 5: rc weight 0.4 → 0.2
     single_raw = (
         df['p_1b']*5.0 - df['p_k']*2.5 - df['p_bb']*1.0
-        - df['p_xb']*0.8 - df['p_hr']*0.5
-        + vc*0.8 + rc*0.4 + hb
+        - df['p_xb']*0.5 - df['p_hr']*0.8    # FIX 2: flipped from (0.8, 0.5)
+        + vc*0.8 + rc*0.2 + hb
     ) * single_mult
     df['Single_Score'] = normalize_0_100(single_raw)
 
-    # 🔥 XB Score
+    # ── 🔥 XB Score ────────────────────────────────────────────────────────────
+    # FIX 1: BB reduced 1.0→0.3, K reduced 1.5→1.0
+    #        Power/selective hitters walk a lot — IBB included → near neutral.
+    #        K still penalised (contact required for doubles/triples) but lightened.
+    # FIX 5: rc weight 0.6 → 0.4 (keep moderate — park matters more for XBH)
     xb_raw = (
         df['p_xb']*5.0 + df['p_hr']*0.8
-        - df['p_k']*1.5 - df['p_bb']*1.0
-        + vc*1.2 + rc*0.6 + hb
+        - df['p_k']*1.0 - df['p_bb']*0.3     # FIX 1
+        + vc*1.2 + rc*0.4 + hb
     ) * xb_mult
     df['XB_Score'] = normalize_0_100(xb_raw)
 
-    # 💣 HR Score
-    # K%:  near-neutral (-0.15). Power swingers K a lot — high K ≠ bad HR target.
-    #      Tiny residual penalty acknowledges contact still matters at the floor.
-    # BB%: neutral (0). p_bb includes intentional walks (IBB). IBB = pitcher avoided
-    #      the matchup entirely — no pitch thrown = no HR opportunity. The unintentional
-    #      walk (positive signal) and IBB (negative signal) cancel out → 0 is honest.
+    # ── 💣 HR Score ────────────────────────────────────────────────────────────
+    # K near-neutral (0.15): power swingers K a lot — high K ≠ bad HR target.
+    # BB removed (0): p_bb includes IBB (pitcher avoids matchup) — signals cancel.
+    # FIX 5: rc weight 0.5 → 0.35 (park still relevant for HR, modest reduction)
     hr_raw = (
         df['p_hr']*6.0 + df['p_xb']*0.8
         - df['p_k']*0.15
         + df['xb_boost']*0.03
-        + vc*0.5 + rc*0.5 + hb
+        + vc*0.5 + rc*0.35 + hb
     ) * hr_mult
     df['HR_Score'] = normalize_0_100(hr_raw)
 
-    # ── Base (no-park) versions for Park Δ display ────────────────────────────
+    # ── Base (no-park) versions ────────────────────────────────────────────────
     df['Hit_Score_base'] = normalize_0_100(
         (df['p_1b_base']*3.0 + df['p_xb_base']*2.0 + df['p_hr_base']*1.0
          - df['p_k_base']*2.5 - df['p_bb_base']*1.0
-         + vc*1.0 + rc*0.5 + hb) * hit_mult)
+         + vc*1.0 + rc*0.2 + hb) * hit_mult)
 
     df['Single_Score_base'] = normalize_0_100(
         (df['p_1b_base']*5.0 - df['p_k_base']*2.5 - df['p_bb_base']*1.0
-         - df['p_xb_base']*0.8 - df['p_hr_base']*0.5
-         + vc*0.8 + rc*0.4 + hb) * single_mult)
+         - df['p_xb_base']*0.5 - df['p_hr_base']*0.8
+         + vc*0.8 + rc*0.2 + hb) * single_mult)
 
     df['XB_Score_base'] = normalize_0_100(
         (df['p_xb_base']*5.0 + df['p_hr_base']*0.8
-         - df['p_k_base']*1.5 - df['p_bb_base']*1.0
-         + vc*1.2 + rc*0.6 + hb) * xb_mult)
+         - df['p_k_base']*1.0 - df['p_bb_base']*0.3
+         + vc*1.2 + rc*0.4 + hb) * xb_mult)
 
     df['HR_Score_base'] = normalize_0_100(
         (df['p_hr_base']*6.0 + df['p_xb_base']*0.8
          - df['p_k_base']*0.15
          + df['xb_boost']*0.03
-         + vc*0.5 + rc*0.5 + hb) * hr_mult)
+         + vc*0.5 + rc*0.35 + hb) * hr_mult)
 
-    # ── STAGE 2: Statcast post-normalization overlay ──────────────────────────
-    # Applied to both the main score and base score so Park Δ is unaffected.
-    # If Statcast data is unavailable for a player → 0 pts (neutral, no penalty).
-    # Total capped at ±10 pts — BallPark Pal rankings stay intact.
-
+    # ── Statcast post-normalization overlay ────────────────────────────────────
     if _has_statcast(df):
         for score_type, score_col, base_col in [
             ('HR',     'HR_Score',     'HR_Score_base'),
@@ -375,7 +297,6 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_game_condition_scores(df: pd.DataFrame, use_gc: bool = True) -> pd.DataFrame:
     df = df.copy()
-
     has_gc = all(c in df.columns for c in _GC_COLS)
     if not has_gc:
         for sc in ['Hit_Score', 'Single_Score', 'XB_Score', 'HR_Score']:
@@ -383,50 +304,34 @@ def compute_game_condition_scores(df: pd.DataFrame, use_gc: bool = True) -> pd.D
         return df
 
     strength = 1.0 if use_gc else CONFIG['gc_reduced_strength']
-
     hit_combined, hr_combined = _gc_signals(df, strength)
 
-    hit_ceiling_mult = 1.0 + hit_combined.clip(-CONFIG['gc_hit_max_range'],
-                                                CONFIG['gc_hit_max_range'])
-    hr_ceiling_mult  = 1.0 + hr_combined.clip(-CONFIG['gc_hr_max_range'],
-                                               CONFIG['gc_hr_max_range'])
+    hit_mult = 1.0 + hit_combined.clip(-CONFIG['gc_hit_max_range'], CONFIG['gc_hit_max_range'])
+    hr_mult  = 1.0 + hr_combined.clip(-CONFIG['gc_hr_max_range'],  CONFIG['gc_hr_max_range'])
 
-    # GC scores derive from the Statcast-adjusted main scores,
-    # so they automatically inherit the Statcast overlay.
-    df['Hit_Score_gc']    = normalize_0_100(df['Hit_Score']    * hit_ceiling_mult)
-    df['Single_Score_gc'] = normalize_0_100(df['Single_Score'] * hit_ceiling_mult)
-    df['XB_Score_gc']     = normalize_0_100(df['XB_Score']     * hit_ceiling_mult)
-    df['HR_Score_gc']     = normalize_0_100(df['HR_Score']     * hr_ceiling_mult)
-
+    df['Hit_Score_gc']    = normalize_0_100(df['Hit_Score']    * hit_mult)
+    df['Single_Score_gc'] = normalize_0_100(df['Single_Score'] * hit_mult)
+    df['XB_Score_gc']     = normalize_0_100(df['XB_Score']     * hit_mult)
+    df['HR_Score_gc']     = normalize_0_100(df['HR_Score']     * hr_mult)
     return df
 
 
 def gc_adjusted_score(pool: pd.DataFrame, sc: str, use_gc: bool = True) -> pd.Series:
-    """GC-adjusted score for parlay builder. Uses _gc_signals — no duplicated weights."""
     base_sc = sc.replace('_gc', '')
     gc_col  = base_sc + '_gc'
-
     if gc_col in pool.columns:
         return pool[gc_col]
-
     if base_sc not in pool.columns:
         return pd.Series(50.0, index=pool.index)
-
     if not all(c in pool.columns for c in _GC_COLS):
         return pool[base_sc]
 
     strength = 1.0 if use_gc else CONFIG['gc_reduced_strength']
     hit_combined, hr_combined = _gc_signals(pool, strength)
-
-    if base_sc == 'HR_Score':
-        combined = hr_combined
-        MAX      = CONFIG['gc_hr_max_range']
-    else:
-        combined = hit_combined
-        MAX      = CONFIG['gc_hit_max_range']
-
-    raw = pool[base_sc] * (1.0 + combined.clip(-MAX, MAX))
-    mn, mx = raw.min(), raw.max()
+    combined = hr_combined if base_sc == 'HR_Score' else hit_combined
+    MAX      = CONFIG['gc_hr_max_range'] if base_sc == 'HR_Score' else CONFIG['gc_hit_max_range']
+    raw      = pool[base_sc] * (1.0 + combined.clip(-MAX, MAX))
+    mn, mx   = raw.min(), raw.max()
     if mx == mn:
         return pd.Series(50.0, index=pool.index)
     return ((raw - mn) / (mx - mn) * 100).round(1)

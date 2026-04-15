@@ -1,9 +1,14 @@
 """
 renders.py — All render_* functions for the main predictor page
 
-Fixes applied:
-  - applymap() → map()  (pandas 3.0 removed Styler.applymap; use .map() instead)
-  - use_container_width=True → width='stretch'  (Streamlit 1.45+ deprecation)
+UI/UX improvements V2:
+  - Animated pulse dot on fresh data badge in header
+  - Score tier labels (Elite / Strong / Good / Moderate) on cards
+  - Better section dividers and visual hierarchy
+  - Confidence badge on Best Per Target cards
+  - Statcast indicator badge on results header when data present
+  - .map() replaces deprecated .applymap() (pandas 3.0)
+  - width='stretch' replaces use_container_width (Streamlit 1.45+)
 """
 
 import streamlit as st
@@ -12,25 +17,41 @@ import altair as alt
 from config import CONFIG
 from helpers import grade_pill, style_grade_cell, data_freshness_badge
 
+
+def _score_tier(score: float) -> tuple[str, str]:
+    """Return (label, css_color) for a 0-100 score."""
+    if score >= 75: return "ELITE",    "#4ade80"
+    if score >= 60: return "STRONG",   "#a3e635"
+    if score >= 45: return "GOOD",     "#fbbf24"
+    if score >= 30: return "MODERATE", "#fb923c"
+    return             "WEAK",     "#f87171"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_header():
     badge = data_freshness_badge()
+    # Add animated pulse to green badge
+    badge_html = badge.replace(
+        'sbadge-green">',
+        'sbadge-green"><span class="pulse-dot"></span>'
+    )
     st.markdown(f"""
     <div class="app-header">
       <div>
         <img src="https://github.com/a1faded/a1picks-hits-bot/blob/main/a1sports.png?raw=true"
-             style="height:38px;width:auto;" />
+             style="height:40px;width:auto;filter:drop-shadow(0 0 8px rgba(59,130,246,.4))" />
       </div>
       <div class="title-wrap">
         <h1>A1PICKS MLB Hit Predictor</h1>
-        <p>BallPark Pal simulations · MLB Stats API · Statcast · V5.2</p>
+        <p>BallPark Pal simulations &nbsp;·&nbsp; MLB Stats API &nbsp;·&nbsp; Statcast &nbsp;·&nbsp; V5.5</p>
       </div>
-      <div class="meta">{badge}</div>
+      <div class="meta">{badge_html}</div>
     </div>
     """, unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STAT BAR
@@ -42,11 +63,12 @@ def render_stat_bar(df: pd.DataFrame):
 
     avg_hp = df['total_hit_prob'].mean()
     avg_hr = df['p_hr'].mean() if 'p_hr' in df.columns else 0
+    has_sc = any(c in df.columns and df[c].notna().any() for c in ['Barrel%', 'HH%', 'xBA'])
 
     lineup_badge = ""
     try:
         from mlb_api import get_lineup_status_map
-        smap     = get_lineup_status_map()
+        smap      = get_lineup_status_map()
         confirmed = sum(1 for v in smap.values() if '✅' in v['status'])
         total     = len(smap)
         color     = "var(--hit)" if confirmed == total else "var(--xb)"
@@ -58,16 +80,38 @@ def render_stat_bar(df: pd.DataFrame):
     except Exception:
         pass
 
+    sc_badge = (
+        '<div class="stat-item">'
+        '<span class="val" style="color:var(--accent);font-size:.85rem">⚡</span>'
+        '<span class="lbl">Statcast ON</span></div>'
+    ) if has_sc else ""
+
     st.markdown(f"""
     <div class="stat-bar">
-      <div class="stat-item"><span class="val">{len(df)}</span><span class="lbl">Matchups</span></div>
-      <div class="stat-item"><span class="val">{df['Batter'].nunique()}</span><span class="lbl">Batters</span></div>
-      <div class="stat-item"><span class="val">{df['Team'].nunique()}</span><span class="lbl">Teams</span></div>
-      <div class="stat-item"><span class="val" style="color:var(--hit)">{avg_hp:.1f}%</span><span class="lbl">Avg Hit Prob</span></div>
-      <div class="stat-item"><span class="val" style="color:var(--hr)">{avg_hr:.2f}%</span><span class="lbl">Avg HR Prob</span></div>
-      {lineup_badge}
+      <div class="stat-item">
+        <span class="val">{len(df)}</span>
+        <span class="lbl">Matchups</span>
+      </div>
+      <div class="stat-item">
+        <span class="val">{df['Batter'].nunique()}</span>
+        <span class="lbl">Batters</span>
+      </div>
+      <div class="stat-item">
+        <span class="val">{df['Team'].nunique()}</span>
+        <span class="lbl">Teams</span>
+      </div>
+      <div class="stat-item">
+        <span class="val" style="color:var(--hit)">{avg_hp:.1f}%</span>
+        <span class="lbl">Avg Hit Prob</span>
+      </div>
+      <div class="stat-item">
+        <span class="val" style="color:var(--hr)">{avg_hr:.2f}%</span>
+        <span class="lbl">Avg HR Prob</span>
+      </div>
+      {lineup_badge}{sc_badge}
     </div>
     """, unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SCORE SUMMARY CARDS
@@ -95,24 +139,34 @@ def render_score_summary_cards(slate_df: pd.DataFrame, filters: dict):
             continue
         rank_sc  = (sc + '_gc') if (use_gc and sc + '_gc' in slate_df.columns) else sc
         row      = slate_df.loc[slate_df[rank_sc].idxmax()]
-        disp_val = row[rank_sc]
+        disp_val = float(row[rank_sc])
         base_col = sc + '_base'
+        gc_str   = " ⛅" if use_gc and rank_sc != sc else ""
+
         park_str = ""
         if filters['use_park'] and base_col in slate_df.columns and row.get(base_col, 0) != 0:
             delta    = row[sc] - row[base_col]
             pct      = delta / row[base_col] * 100
-            park_str = f" · park {'+' if delta>=0 else ''}{pct:.0f}%"
-        gc_str = " ⛅" if use_gc and rank_sc != sc else ""
+            park_str = f" · <span style='color:{'var(--pos)' if delta>=0 else 'var(--neg)'}'>{'+' if delta>=0 else ''}{pct:.0f}% park</span>"
+
+        tier_lbl, tier_color = _score_tier(disp_val)
+
         cards_html += f"""
         <div class="scard {css}">
           <div class="sc-type"><span>{icon} {short}</span>{gc_str} — {desc}</div>
           <div class="sc-name">{row['Batter']}</div>
           <div class="sc-meta">{row['Team']} vs {row['Pitcher']}{park_str}</div>
           <div class="sc-score">{disp_val:.1f}</div>
+          <div style="margin-top:.35rem">
+            <span style="font-size:.62rem;padding:1px 6px;border-radius:20px;
+              background:{tier_color}22;color:{tier_color};font-weight:700;
+              font-family:'JetBrains Mono',monospace;letter-spacing:.04em">{tier_lbl}</span>
+          </div>
         </div>"""
 
     cards_html += '</div>'
     st.markdown(cards_html, unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PITCHER LANDSCAPE
@@ -131,25 +185,25 @@ def render_pitcher_landscape(pitcher_df, df: pd.DataFrame):
 
         for p in sorted(today_pitchers):
             if p in pm.index:
-                r        = pm.loc[p]
-                grade_h  = grade_pill(str(r['pitch_grade']))
-                hit_val  = f"{r['hit8_prob']:.1f}%"
-                hr_val   = f"{r['hr2_prob']:.1f}%"
-                wk_val   = f"{r['walk3_prob']:.1f}%"
-                hm_val   = f"{r['pitch_hit_mult']:.3f}×"
-                hrm_val  = f"{r['pitch_hr_mult']:.3f}×"
+                r       = pm.loc[p]
+                grade_h = grade_pill(str(r['pitch_grade']))
                 name, team = r['full_name'], r['team']
+                hit_val    = f"{r['hit8_prob']:.1f}%"
+                hr_val     = f"{r['hr2_prob']:.1f}%"
+                wk_val     = f"{r['walk3_prob']:.1f}%"
+                hm_val     = f"{r['pitch_hit_mult']:.3f}×"
+                hrm_val    = f"{r['pitch_hr_mult']:.3f}×"
             else:
-                grade_h  = grade_pill('B')
-                hit_val  = f"{CONFIG['pitcher_hit_neutral']:.1f}% *"
-                hr_val   = f"{CONFIG['pitcher_hr_neutral']:.1f}% *"
-                wk_val   = f"{CONFIG['pitcher_walk_neutral']:.1f}% *"
-                hm_val, hrm_val = "1.000×", "1.000×"
+                grade_h = grade_pill('B')
                 name, team = p, "—"
+                hit_val = f"{CONFIG['pitcher_hit_neutral']:.1f}% *"
+                hr_val  = f"{CONFIG['pitcher_hr_neutral']:.1f}% *"
+                wk_val  = f"{CONFIG['pitcher_walk_neutral']:.1f}% *"
+                hm_val  = hrm_val = "1.000×"
 
             rows_html += f"""<tr>
-              <td style="color:var(--text);font-family:Outfit,sans-serif">{name}</td>
-              <td style="color:var(--muted);font-family:Outfit,sans-serif">{team}</td>
+              <td style="color:var(--text)">{name}</td>
+              <td style="color:var(--muted)">{team}</td>
               <td>{grade_h}</td>
               <td style="color:var(--hit)">{hit_val}</td>
               <td style="color:var(--hr)">{hr_val}</td>
@@ -166,8 +220,9 @@ def render_pitcher_landscape(pitcher_df, df: pd.DataFrame):
         </tr></thead><tbody>{rows_html}</tbody></table></div>
         <div class="notice notice-pitcher" style="margin-top:.5rem">
           📊 <b>Hit 8+</b> drives Hit/Single/XB multiplier · <b>HR 2+</b> drives HR multiplier ·
-          <b>Walk 3+</b> mild penalty all scores · Max effect ±5%
+          <b>Walk 3+</b> mild penalty all scores · Max effect ±8%
         </div>""", unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PARK NOTICE
@@ -178,9 +233,8 @@ def render_park_notice(slate_df: pd.DataFrame, filters: dict):
     use_gc   = filters.get('use_gc', False)
     sc       = (sc_base + '_gc') if (use_gc and sc_base + '_gc' in slate_df.columns) else sc_base
     base_sc  = sc_base + '_base'
-    use_park = filters['use_park']
 
-    if not use_park:
+    if not filters['use_park']:
         st.markdown('<div class="notice notice-park">🏟️ <b>Park OFF</b> — pure player vs pitcher.</div>',
                     unsafe_allow_html=True)
         return
@@ -201,6 +255,7 @@ def render_park_notice(slate_df: pd.DataFrame, filters: dict):
         unsafe_allow_html=True
     )
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # GAME CONDITIONS PANEL
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,7 +273,7 @@ def render_game_conditions_panel(slate_df: pd.DataFrame, filters: dict,
     if slate_df.empty or not all(c in slate_df.columns for c in gc_cols):
         st.markdown(
             '<div class="notice notice-warn">🌦️ <b>Game Conditions ON</b> — '
-            'No game condition CSVs found yet. Scores unaffected.</div>',
+            'No game condition CSVs found. Scores unaffected.</div>',
             unsafe_allow_html=True)
         return
 
@@ -235,13 +290,13 @@ def render_game_conditions_panel(slate_df: pd.DataFrame, filters: dict,
         avg_base = gdf[sc].mean()
         avg_gc   = gdf[gc_sc_col].mean()
         game_rows.append({
-            'Game':        game,
-            '4+ HR %':    f"{row['gc_hr4']:.1f}%",
-            '20+ Hits %': f"{row['gc_hits20']:.1f}%",
-            '20+ Ks %':   f"{row['gc_k20']:.1f}%",
-            '8+ Walks %': f"{row['gc_walks8']:.1f}%",
-            '10+ Runs %': f"{row['gc_runs10']:.1f}%",
-            'QS %':        f"{row['gc_qs']:.1f}%",
+            'Game':         game,
+            '4+ HR %':     f"{row['gc_hr4']:.1f}%",
+            '20+ Hits %':  f"{row['gc_hits20']:.1f}%",
+            '20+ Ks %':    f"{row['gc_k20']:.1f}%",
+            '8+ Walks %':  f"{row['gc_walks8']:.1f}%",
+            '10+ Runs %':  f"{row['gc_runs10']:.1f}%",
+            'QS %':         f"{row['gc_qs']:.1f}%",
             'Cond Δ (avg)': avg_gc - avg_base,
         })
 
@@ -257,6 +312,7 @@ def render_game_conditions_panel(slate_df: pd.DataFrame, filters: dict,
         styled   = styled.background_gradient(subset=['Cond Δ (avg)'],
                                               cmap='RdYlGn', vmin=-8, vmax=8)
         st.dataframe(styled, width='stretch', hide_index=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULTS TABLE
@@ -286,7 +342,7 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         (disp[sc_base] - disp[base_sc]).round(1)
         if (use_park and base_sc in disp.columns) else 0.0
     )
-    disp['Cond Δ']  = (
+    disp['Cond Δ'] = (
         (disp[sc_gc] - disp[sc_base]).round(1)
         if (use_gc and sc_gc in disp.columns) else 0.0
     )
@@ -300,10 +356,10 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
             'pitch_grade':'P.Grd', sc: active_label}
 
     if use_park and base_sc in disp.columns:
-        cols[base_sc]   = 'Base'
-        cols['Park Δ']  = 'Park Δ'
+        cols[base_sc]  = 'Base'
+        cols['Park Δ'] = 'Park Δ'
     if use_gc and sc_gc in disp.columns:
-        cols['Cond Δ']  = 'Cond Δ'
+        cols['Cond Δ'] = 'Cond Δ'
 
     for sc2, lb2 in lbl.items():
         if sc2 != sc_base and sc2 != sc_gc and sc2 in disp.columns:
@@ -314,10 +370,9 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
                  'BB% ↓Lg':'BB% ↓Lg','HR% ↑Lg':'HR% ↑Lg',
                  'vs Grade':'vsPit','PA':'PA','AVG':'AVG'})
 
-    # ── Statcast columns (present when savant join succeeded) ────────────────
     statcast_cols = {'Barrel%':'Barrel%','HH%':'HH%','xBA':'xBA',
                      'xSLG':'xSLG','AvgEV':'AvgEV','maxEV':'maxEV'}
-    has_statcast  = any(c in disp.columns for c in statcast_cols)
+    has_statcast  = any(c in disp.columns and disp[c].notna().any() for c in statcast_cols)
     if has_statcast:
         for raw, label in statcast_cols.items():
             if raw in disp.columns:
@@ -368,33 +423,35 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
                 pass
 
     if 'P.Grd' in out_df.columns:
-        # FIX: .map() replaces deprecated .applymap() (removed in pandas 3.0)
         styled = styled.map(style_grade_cell, subset=['P.Grd'])
 
     st.dataframe(styled, width='stretch')
 
     LG        = CONFIG
     park_note = (
-        "<b>Park Δ</b> = park impact per player. Toggle park OFF for pure base."
+        "<b>Park Δ</b> = park impact per player."
         if use_park else "Park OFF — pure player vs pitcher."
     )
     gc_note = " · <b>Cond Δ ⛅</b> = game conditions shift" if use_gc else ""
-    sc_note = " · <b>Barrel%/HH%/AvgEV</b> = Statcast season metrics" if has_statcast else ""
+    sc_note = " · <b>Barrel%/HH%/AvgEV</b> = Statcast season" if has_statcast else ""
 
     st.markdown(f"""
     <div class="legend-compact">
       <span class="hit-c">🎯 Hit</span> 1B×3 · K pen heavy &nbsp;
       <span class="sl-c">1️⃣ Single</span> 1B×5 · XB/HR penalised &nbsp;
-      <span class="xb-c">🔥 XB</span> XB×5 · mod K pen &nbsp;
-      <span class="hr-c">💣 HR</span> HR×6 · light K pen<br>
-      <b>K% ↓Lg</b> below league ({LG['league_k_avg']}%) · <b>BB% ↓Lg</b> below league ({LG['league_bb_avg']}%) ·
-      <b>HR% ↑Lg</b> above league ({LG['league_hr_avg']}%) · <b>PA/AVG</b> vs this pitcher
+      <span class="xb-c">🔥 XB</span> XB×5 · mod K &nbsp;
+      <span class="hr-c">💣 HR</span> HR×6 · K near-neutral · BB neutral<br>
+      <b>K% ↓Lg</b> vs league {LG['league_k_avg']}% ·
+      <b>BB% ↓Lg</b> vs league {LG['league_bb_avg']}% ·
+      <b>HR% ↑Lg</b> vs league {LG['league_hr_avg']}% ·
+      <b>PA/AVG</b> vs this pitcher ·
       {park_note}{gc_note}{sc_note}
     </div>
     """, unsafe_allow_html=True)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# PLAYER DEEP DIVE — Game Log + Statcast
+# PLAYER DEEP DIVE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
@@ -403,29 +460,24 @@ def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
 
     with st.expander("🔬 Player Deep Dive — Game Log & Statcast", expanded=False):
         st.markdown(
-            '<div class="notice notice-info">Select any player from today\'s filtered list '
-            'to see their last 10 games + quality-of-contact metrics.</div>',
+            '<div class="notice notice-info">Select any player from the filtered list '
+            'to see their last 10 games + rolling quality-of-contact metrics.</div>',
             unsafe_allow_html=True
         )
-
         players    = sorted(filtered_df['Batter'].unique().tolist())
         sel_player = st.selectbox("Select Player", players, key="deep_dive_player")
         pid        = player_id_map.get(sel_player)
 
         col1, col2 = st.columns([3, 2])
 
-        # ── Game Log ──────────────────────────────────────────────────────────
         with col1:
             st.markdown(f"**📅 {sel_player} — Last 10 Games**")
             if pid:
                 from mlb_api import get_player_game_log
                 log_df = get_player_game_log(pid, last_n=10)
-
                 if not log_df.empty:
                     def _style_hits(val):
                         return 'color:#10b981;font-weight:700' if val > 0 else ''
-
-                    # FIX: .map() replaces .applymap() — removed in pandas 3.0
                     styled_log = (
                         log_df.style
                         .map(_style_hits, subset=['H'])
@@ -434,19 +486,22 @@ def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
                     st.dataframe(styled_log, width='stretch', hide_index=True)
 
                     if 'H' in log_df.columns and 'AB' in log_df.columns:
-                        games_played = len(log_df[log_df['AB'] > 0])
-                        games_hit    = len(log_df[log_df['H'] > 0])
-                        total_h      = log_df['H'].sum()
-                        total_hr     = log_df['HR'].sum()
-                        hit_rate     = games_hit / games_played if games_played else 0
-                        color        = ("var(--hit)"  if hit_rate >= 0.6 else
-                                        "var(--xb)"   if hit_rate >= 0.4 else "var(--hr)")
+                        played   = len(log_df[log_df['AB'] > 0])
+                        hit_games= len(log_df[log_df['H'] > 0])
+                        total_h  = log_df['H'].sum()
+                        total_hr = log_df['HR'].sum()
+                        rate     = hit_games / played if played else 0
+                        color    = ("var(--hit)" if rate >= 0.6 else
+                                    "var(--xb)"  if rate >= 0.4 else "var(--hr)")
+                        tier, tc = _score_tier(rate * 100)
                         st.markdown(
                             f'<div style="font-size:.78rem;color:var(--muted);margin-top:.4rem">'
-                            f'Last {games_played} games: '
-                            f'<span style="color:{color};font-weight:700">'
-                            f'{games_hit} hits in {games_played} games</span> · '
-                            f'{total_h} H · {total_hr} HR</div>',
+                            f'Last {played} G: <span style="color:{color};font-weight:700">'
+                            f'{hit_games} hits in {played} games</span> · '
+                            f'{total_h} H · {total_hr} HR &nbsp;'
+                            f'<span style="background:{tc}22;color:{tc};padding:1px 6px;'
+                            f'border-radius:20px;font-size:.65rem;font-weight:700">{tier}</span>'
+                            f'</div>',
                             unsafe_allow_html=True
                         )
                 else:
@@ -454,7 +509,6 @@ def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
             else:
                 st.info("⏳ Player ID not resolved — game log unavailable.")
 
-        # ── Rolling Statcast ──────────────────────────────────────────────────
         with col2:
             st.markdown(f"**⚡ Statcast — Last 30 Days**")
             if pid:
@@ -463,6 +517,7 @@ def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
                     metrics = get_batter_quality_metrics(pid, days_back=30)
                     if metrics:
                         metric_rows = [
+                            ("Sample",    f"{metrics.get('sample_size','—')} BIP",  "var(--muted)"),
                             ("Avg EV",    f"{metrics.get('avg_ev','—')} mph",
                              "var(--hit)" if metrics.get('avg_ev',0) >= 90 else "var(--text)"),
                             ("Max EV",    f"{metrics.get('max_ev','—')} mph",
@@ -471,11 +526,9 @@ def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
                              "var(--hit)" if metrics.get('barrel_pct',0) >= 8 else "var(--text)"),
                             ("Hard Hit%", f"{metrics.get('hard_hit_pct','—')}%",
                              "var(--hit)" if metrics.get('hard_hit_pct',0) >= 40 else "var(--text)"),
-                            ("Avg LA",    f"{metrics.get('avg_la','—')}°", "var(--text)"),
-                            ("xBA",       f"{metrics.get('xba','—')}",     "var(--text)"),
-                            ("xwOBA",     f"{metrics.get('xwoba','—')}",   "var(--text)"),
-                            ("Sample",    f"{metrics.get('sample_size','—')} batted balls",
-                             "var(--muted)"),
+                            ("Avg LA",    f"{metrics.get('avg_la','—')}°",    "var(--text)"),
+                            ("xBA",       f"{metrics.get('xba','—')}",        "var(--text)"),
+                            ("xwOBA",     f"{metrics.get('xwoba','—')}",      "var(--text)"),
                         ]
                         rows_html = "".join(
                             f'<div class="pcard-row">'
@@ -489,11 +542,12 @@ def render_player_deep_dive(filtered_df: pd.DataFrame, player_id_map: dict):
                             unsafe_allow_html=True
                         )
                     else:
-                        st.info("No Statcast data in last 30 days.")
+                        st.info(f"No Statcast data in last 30 days.")
                 except Exception:
-                    st.info("Statcast data unavailable (pybaseball).")
+                    st.info("Statcast unavailable.")
             else:
                 st.info("⏳ Player ID not resolved.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BEST PER TARGET
@@ -504,8 +558,11 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
         return
 
     with st.expander("🔍 Best Per Target — Full Slate", expanded=True):
-        st.markdown('<div class="notice notice-info">ℹ️ Full slate (exclusions only). '
-                    'Unaffected by target filter.</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="notice notice-info">ℹ️ Full slate (exclusions only). '
+            'Not affected by target/stat filters.</div>',
+            unsafe_allow_html=True
+        )
 
         defs = [
             ('Hit_Score',    'pcard-hit',    '🎯', 'HIT',    'Any Base Hit'),
@@ -526,15 +583,19 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
             disp_val = float(row[rank_sc])
             base_col = sc + '_base'
 
+            tier_lbl, tier_color = _score_tier(disp_val)
+
             park_row = ""
             if filters['use_park'] and base_col in slate_df.columns \
                     and row.get(base_col, 0) != 0:
                 delta    = row[sc] - row[base_col]
                 pct      = delta / row[base_col] * 100
                 col_     = "var(--pos)" if delta >= 0 else "var(--neg)"
-                park_row = (f'<div class="pcard-row"><span class="pk">Park Δ</span>'
-                            f'<span class="pv" style="color:{col_}">'
-                            f'{("+" if delta>=0 else "")}{pct:.1f}%</span></div>')
+                park_row = (
+                    f'<div class="pcard-row"><span class="pk">Park Δ</span>'
+                    f'<span class="pv" style="color:{col_}">'
+                    f'{("+" if delta>=0 else "")}{pct:.1f}%</span></div>'
+                )
 
             k_lg  = LG['league_k_avg']  - row['p_k']
             bb_lg = LG['league_bb_avg'] - row['p_bb']
@@ -546,29 +607,39 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
 
             hist_row = ""
             if row['PA'] >= LG['hist_min_pa']:
-                hist_row = (f'<div class="pcard-row"><span class="pk">Hist PA</span>'
-                            f'<span class="pv">{int(row["PA"])} PA · {row["AVG"]:.3f}'
-                            f'</span></div>')
+                hist_row = (
+                    f'<div class="pcard-row"><span class="pk">Hist PA</span>'
+                    f'<span class="pv">{int(row["PA"])} PA · {row["AVG"]:.3f}</span></div>'
+                )
 
             sc_row = ""
             if 'Barrel%' in slate_df.columns and pd.notna(row.get('Barrel%')):
-                sc_row = (f'<div class="pcard-row"><span class="pk">Barrel%</span>'
-                          f'<span class="pv" style="color:var(--hit)">'
-                          f'{row["Barrel%"]:.1f}%</span></div>')
+                sc_row = (
+                    f'<div class="pcard-row"><span class="pk">Barrel%</span>'
+                    f'<span class="pv" style="color:var(--hit)">'
+                    f'{row["Barrel%"]:.1f}%</span></div>'
+                )
 
             cards_html += f"""
             <div class="pcard {css}">
               <div class="pcard-header">
-                <div><div class="pcard-name">{row['Batter']}</div>
-                <div class="pcard-team">{row['Team']} · {icon} {desc}</div></div>
-                <div class="pcard-score">{disp_val:.1f}</div>
+                <div>
+                  <div class="pcard-name">{row['Batter']}</div>
+                  <div class="pcard-team">{row['Team']} · {icon} {desc}</div>
+                </div>
+                <div style="text-align:right">
+                  <div class="pcard-score">{disp_val:.1f}</div>
+                  <div style="font-size:.6rem;padding:1px 5px;border-radius:20px;
+                    background:{tier_color}22;color:{tier_color};font-weight:700;
+                    margin-top:.2rem;font-family:'JetBrains Mono',monospace">{tier_lbl}</div>
+                </div>
               </div>
               <div class="pcard-row"><span class="pk">Pitcher</span>
                 <span class="pv">{row['Pitcher']} {gph}</span></div>
               <div class="pcard-row"><span class="pk">Hit Prob</span>
                 <span class="pv">{row['total_hit_prob']:.1f}%</span></div>
-              <div class="pcard-row"><span class="pk">1B/XB/HR</span>
-                <span class="pv">{row['p_1b']:.1f}/{row['p_xb']:.1f}/{row['p_hr']:.1f}%</span></div>
+              <div class="pcard-row"><span class="pk">1B / XB / HR</span>
+                <span class="pv">{row['p_1b']:.1f} / {row['p_xb']:.1f} / {row['p_hr']:.1f}%</span></div>
               <div class="pcard-row"><span class="pk">K%</span>
                 <span class="pv">{row['p_k']:.1f}% <span class="{k_cls}">({k_lg:+.1f})</span></span></div>
               <div class="pcard-row"><span class="pk">BB%</span>
@@ -583,20 +654,22 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
         cards_html += '</div>'
         st.markdown(cards_html, unsafe_allow_html=True)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # VISUALIZATIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col: str):
     with st.expander("📈 Charts & Team Summary", expanded=False):
-        axis_cfg = alt.Axis(gridColor='#1e2d3d', domainColor='#1e2d3d',
-                            labelColor='#64748b', titleColor='#64748b', labelFontSize=9)
+        axis_cfg  = alt.Axis(gridColor='#1e2d3d', domainColor='#1e2d3d',
+                             labelColor='#64748b', titleColor='#64748b', labelFontSize=9)
         title_cfg = lambda t: alt.TitleParams(t, color='#94a3b8', fontSize=11)
 
         c1, c2 = st.columns(2)
-
         with c1:
-            ch = alt.Chart(df).mark_bar(color='#3b82f6', opacity=0.75).encode(
+            ch = alt.Chart(df).mark_bar(
+                color='#3b82f6', opacity=0.8, cornerRadiusTopLeft=3, cornerRadiusTopRight=3
+            ).encode(
                 alt.X(f'{score_col}:Q', bin=alt.Bin(maxbins=15), title='Score', axis=axis_cfg),
                 alt.Y('count()', title='Players', axis=axis_cfg),
                 tooltip=['count()']
@@ -605,7 +678,7 @@ def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col
 
         with c2:
             if not filtered_df.empty:
-                ch2 = alt.Chart(filtered_df).mark_circle(size=80, opacity=0.8).encode(
+                ch2 = alt.Chart(filtered_df).mark_circle(size=80, opacity=0.85).encode(
                     alt.X('total_hit_prob:Q', title='Hit Prob %', axis=axis_cfg),
                     alt.Y('p_k:Q',            title='K Prob %',   axis=axis_cfg),
                     alt.Color(f'{score_col}:Q', scale=alt.Scale(scheme='viridis'), legend=None),
@@ -626,12 +699,13 @@ def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col
             ]
             r1c1, r1c2 = st.columns(2)
             r2c1, r2c2 = st.columns(2)
-
             for i, (sc, colour, label) in enumerate(score_defs):
                 if sc not in filtered_df.columns:
                     continue
                 chart_df = filtered_df[['Batter', sc]].sort_values(sc, ascending=False)
-                ch_s = alt.Chart(chart_df).mark_bar(color=colour, opacity=0.85).encode(
+                ch_s = alt.Chart(chart_df).mark_bar(
+                    color=colour, opacity=0.85, cornerRadiusTopLeft=2, cornerRadiusTopRight=2
+                ).encode(
                     alt.X('Batter:N', sort='-y',
                           axis=alt.Axis(labelAngle=-45, labelFontSize=8,
                                         labelColor='#64748b', domainColor='#1e2d3d')),
@@ -641,17 +715,16 @@ def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col
                                         title='Score')),
                     tooltip=['Batter', alt.Tooltip(f'{sc}:Q', format='.1f', title='Score')]
                 ).properties(title=title_cfg(label), width=250, height=180)
-
                 with [r1c1, r1c2, r2c1, r2c2][i]:
                     st.altair_chart(ch_s.configure_view(strokeWidth=0), use_container_width=True)
 
         if not filtered_df.empty:
             ts = filtered_df.groupby('Team').agg(
-                Players    =('Batter',         'count'),
-                AvgHitProb =('total_hit_prob',  'mean'),
-                AvgHit     =('Hit_Score',        'mean'),
-                AvgXB      =('XB_Score',         'mean'),
-                AvgHR      =('HR_Score',         'mean'),
+                Players    =('Batter',        'count'),
+                AvgHitProb =('total_hit_prob', 'mean'),
+                AvgHit     =('Hit_Score',       'mean'),
+                AvgXB      =('XB_Score',        'mean'),
+                AvgHR      =('HR_Score',        'mean'),
             ).round(1).sort_values('AvgHitProb', ascending=False).reset_index()
             ts.columns = ['Team','Players','Avg Hit%','🎯 Hit','🔥 XB','💣 HR']
             st.markdown("**Team Summary**")

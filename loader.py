@@ -71,7 +71,10 @@ def _detect_slate_date(df: pd.DataFrame) -> str | None:
     for col in ['Date','GameDate','game_date','date']:
         if col in df.columns:
             try:
-                dt = pd.to_datetime(df[col].dropna().iloc[0], errors='coerce')
+                non_null = df[col].dropna()
+                if non_null.empty:
+                    continue
+                dt = pd.to_datetime(non_null.iloc[0], errors='coerce')
                 if pd.notna(dt):
                     return dt.strftime('%Y-%m-%d')
             except Exception:
@@ -79,7 +82,10 @@ def _detect_slate_date(df: pd.DataFrame) -> str | None:
 
     if 'Game' in df.columns:
         try:
-            sample = str(df['Game'].dropna().iloc[0]).strip()
+            non_null = df['Game'].dropna()
+            if non_null.empty:
+                return None
+            sample = str(non_null.iloc[0]).strip()
             token  = sample.split()[0].rstrip(' -')
             for fmt in ['%Y-%m-%d','%m/%d/%Y','%m/%d']:
                 try:

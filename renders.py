@@ -675,15 +675,19 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
             # Batting order slot
             order_row = ""
             if '_order_pos' in slate_df.columns and pd.notna(row.get('_order_pos')):
-                slot = int(row['_order_pos'])
-                slot_ctx = {1:"Leadoff",2:"#2 Hitter",3:"#3 Hitter",
-                            4:"Cleanup",5:"#5 Hitter"}.get(slot, f"#{slot} Hitter")
-                slot_color = "var(--hit)" if slot in (3,4,5) else \
-                             "var(--accent)" if slot in (1,2) else "var(--muted)"
-                order_row = (
-                    f'<div class="pcard-row"><span class="pk">Lineup Slot</span>'
-                    f'<span class="pv" style="color:{slot_color}">#{slot} — {slot_ctx}</span></div>'
-                )
+                try:
+                    slot = int(float(row['_order_pos']))   # float() first handles "4.0" strings
+                except (ValueError, TypeError):
+                    slot = None
+                if slot:
+                    slot_ctx   = {1:"Leadoff",2:"#2 Hitter",3:"#3 Hitter",
+                                  4:"Cleanup",5:"#5 Hitter"}.get(slot, f"#{slot} Hitter")
+                    slot_color = "var(--hit)" if slot in (3,4,5) else \
+                                 "var(--accent)" if slot in (1,2) else "var(--muted)"
+                    order_row  = (
+                        f'<div class="pcard-row"><span class="pk">Lineup Slot</span>'
+                        f'<span class="pv" style="color:{slot_color}">#{slot} — {slot_ctx}</span></div>'
+                    )
 
             # Rolling form badge
             form_row = ""

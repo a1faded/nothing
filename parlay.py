@@ -347,8 +347,13 @@ def parlay_page(df: pd.DataFrame):
         game_pool   = pool[pool['Game'] == chosen_game].copy()
         if parlay_type == "SGP — Stack (same team)":
             primary_sc = leg_bets[0]
-            team_avg   = game_pool.groupby('Team')[primary_sc].mean()
-            build_pool = game_pool[game_pool['Team'] == team_avg.idxmax()].copy()
+            if game_pool.empty or primary_sc not in game_pool.columns:
+                build_pool = game_pool.copy()
+            else:
+                team_avg   = game_pool.groupby('Team')[primary_sc].mean()
+                best_team  = team_avg.idxmax() if not team_avg.empty else None
+                build_pool = game_pool[game_pool['Team'] == best_team].copy() \
+                             if best_team else game_pool.copy()
         else:
             build_pool = game_pool.copy()
     else:

@@ -182,13 +182,17 @@ def main_page():
         df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
 
     # ── Apply confirmed lineup filter if toggled ───────────────────────────────
+    # order_map now contains both last-name keys ('Judge') and full-name keys
+    # ('Aaron Judge') — df['Batter'] is last-name so isin() will match correctly.
     if filters.get('confirmed_only') and order_map:
-        confirmed_batters = set(order_map.keys())
+        # Build the confirmed set from last-name keys (single-word entries)
+        confirmed_last_names = {k for k in order_map if ' ' not in k}
         pre_count = len(df)
-        df = df[df['Batter'].isin(confirmed_batters)]
-        if len(df) < pre_count:
+        df = df[df['Batter'].isin(confirmed_last_names)]
+        hidden = pre_count - len(df)
+        if hidden > 0:
             st.info(f"📋 Showing {len(df)} confirmed-lineup batters "
-                    f"({pre_count - len(df)} unconfirmed hidden)")
+                    f"({hidden} not yet in a submitted lineup)")
 
     if filters.get('use_gc', False):
         gc_col = filters['score_col'] + '_gc'

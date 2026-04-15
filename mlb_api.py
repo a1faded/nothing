@@ -93,28 +93,55 @@ def get_confirmed_lineup(game_id: int) -> dict:
 @st.cache_data(ttl=300)
 def get_batting_order_map() -> dict:
     """
-    {batter_full_name: batting_order_position (1-9)} for all confirmed lineups.
-    Players not yet confirmed → absent from dict → engine applies 0 (neutral).
+    Returns batting order positions keyed by BOTH full name AND last name.
 
-    Position groups that matter for scoring:
-      3-5 (cleanup):        +bonus HR/XB
-      1-2 (table-setters):  +bonus Hit/Single
-      6-9:                   neutral
+    Why both: BallPark Pal CSV uses last name only ('Judge', 'Freeman').
+    MLB Stats API boxscore returns full names ('Aaron Judge', 'Freddie Freeman').
+
+    For unambiguous last names (only one player with that last name confirmed today)
+    we add a last-name key so the BallPark Pal lookup works.
+    For ambiguous last names (e.g. two 'Garcia' in lineups today) we only keep
+    the full-name key to avoid wrong assignments.
+
+    Result used by:
+      - engine._compute_order_adj()     (maps df['Batter'] = last name)
+      - _merge_signal_metadata()         (same)
+      - app confirmed_only filter        (isin check against df['Batter'])
     """
     if not _STATSAPI_OK:
         return {}
-    games, result = get_today_schedule(), {}
+
+    games = get_today_schedule()
+    full_dict: dict[str, int] = {}   # {full_name: order}
+
     for g in games:
         game_id = g.get('game_id')
-        status  = g.get('status','Scheduled')
-        if not game_id or status in ('Postponed','Cancelled','Suspended'):
+        status  = g.get('status', 'Scheduled')
+        if not game_id or status in ('Postponed', 'Cancelled', 'Suspended'):
             continue
         lineup = get_confirmed_lineup(game_id)
-        for side in ('away','home'):
+        for side in ('away', 'home'):
             for b in lineup[side]:
-                name = b.get('name','').strip()
+                name = b.get('name', '').strip()
                 if name:
-                    result[name] = b['order']
+                    full_dict[name] = b['order']
+
+    if not full_dict:
+        return {}
+
+    # Count how many confirmed players share each last name today
+    last_name_count: dict[str, int] = {}
+    for name in full_dict:
+        last = name.split()[-1]
+        last_name_count[last] = last_name_count.get(last, 0) + 1
+
+    result: dict[str, int] = {}
+    for name, pos in full_dict.items():
+        result[name] = pos                           # always: full name key
+        last = name.split()[-1]
+        if last_name_count[last] == 1:
+            result[last] = pos                       # unambiguous: last-name key too
+
     return result
 
 

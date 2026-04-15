@@ -187,19 +187,24 @@ def enrich_slate_with_statcast(df: pd.DataFrame, player_id_map: dict) -> pd.Data
         if col not in df.columns:
             df[col] = np.nan
 
-    for idx, row in df.iterrows():
-        batter  = row.get('Batter', '')
-        mlbam   = player_id_map.get(batter)
-        if not mlbam:
+    # Build per-column fill series from leaderboard — vectorized, no iterrows
+    # For each Statcast column, create a Series indexed by batter name.
+    # Then fill NaN / zero cells in df with values from that Series.
+    for col in _SC_COLS:
+        # Build {batter_name: value} for this column from leaderboard
+        col_vals: dict[str, float] = {}
+        for batter, mlbam in player_id_map.items():
+            stats = leaderboard.get(int(mlbam), {})
+            val   = stats.get(col)
+            if val is not None and not np.isnan(float(val)) and float(val) != 0:
+                col_vals[batter] = float(val)
+
+        if not col_vals:
             continue
 
-        stats = leaderboard.get(int(mlbam), {})
-        if not stats:
-            continue
-
-        for col, val in stats.items():
-            if col in df.columns and (pd.isna(df.at[idx, col]) or df.at[idx, col] == 0):
-                df.at[idx, col] = val
+        fill_series = df['Batter'].map(col_vals)          # NaN where not in dict
+        missing     = df[col].isna() | (df[col] == 0)    # cells to fill
+        df.loc[missing, col] = fill_series[missing]
 
     return df
 

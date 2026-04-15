@@ -181,18 +181,40 @@ def main_page():
         df = _enrich_with_ids(df, player_id_map)
         df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
 
-    # ── Apply confirmed lineup filter if toggled ───────────────────────────────
-    # order_map now contains both last-name keys ('Judge') and full-name keys
-    # ('Aaron Judge') — df['Batter'] is last-name so isin() will match correctly.
-    if filters.get('confirmed_only') and order_map:
-        # Build the confirmed set from last-name keys (single-word entries)
-        confirmed_last_names = {k for k in order_map if ' ' not in k}
-        pre_count = len(df)
-        df = df[df['Batter'].isin(confirmed_last_names)]
-        hidden = pre_count - len(df)
-        if hidden > 0:
-            st.info(f"📋 Showing {len(df)} confirmed-lineup batters "
-                    f"({hidden} not yet in a submitted lineup)")
+    # ── Apply confirmed lineup filter if toggled ──────────────────────────────
+    # Uses get_confirmed_game_abbrs() which derives confirmation from
+    # get_lineup_status_map() — the same function that powers the ✅ sidebar.
+    # Matches on (away_abbr, home_abbr) game pairs instead of player names,
+    # so it works regardless of name format differences between BallPark Pal
+    # and the MLB Stats API.
+    if filters.get('confirmed_only'):
+        try:
+            from mlb_api import get_confirmed_game_abbrs
+            from config import NICK_TO_ABBR
+            confirmed_abbrs = get_confirmed_game_abbrs()
+            if confirmed_abbrs:
+                def _game_confirmed(game_str: str) -> bool:
+                    parts = str(game_str).split(' @ ')
+                    if len(parts) != 2:
+                        return False
+                    away_nick = parts[0].strip()
+                    home_nick = parts[1].strip()
+                    away_abbr = NICK_TO_ABBR.get(away_nick)
+                    home_abbr = NICK_TO_ABBR.get(home_nick)
+                    return bool(away_abbr and home_abbr and
+                                (away_abbr, home_abbr) in confirmed_abbrs)
+                pre_count = len(df)
+                df = df[df['Game'].apply(_game_confirmed)]
+                hidden = pre_count - len(df)
+                confirmed_game_count = len(confirmed_abbrs)
+                st.info(
+                    f"📋 {confirmed_game_count} games with confirmed lineups · "
+                    f"showing {len(df)} batters ({hidden} from unconfirmed games hidden)"
+                )
+            else:
+                st.warning("⏳ No lineups confirmed yet — filter has no effect yet")
+        except Exception as e:
+            st.warning(f"Confirmed filter unavailable: {e}")
 
     if filters.get('use_gc', False):
         gc_col = filters['score_col'] + '_gc'

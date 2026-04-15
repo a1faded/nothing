@@ -201,10 +201,43 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 
 
 def get_slate_df(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
+    """
+    Slate df used by Today's Best and Best Per Target sections.
+
+    Applies ALL global filters so these sections always reflect the user's
+    active filter state — not just exclusions.
+
+    Global filters (applied here AND in apply_filters):
+      excluded_players  — manually excluded players
+      starters_only     — only lineup starters (Starter == 1)
+      include_teams     — only show selected teams
+      exclude_teams     — hide selected teams
+
+    Stat filters (only in apply_filters, NOT here):
+      max_k, max_bb, min_prob, min_vs, result_count, best_per_team
+      These are "narrow" filters for the results table, not for the best-player cards.
+
+    Note: confirmed_only is applied to df in app.py BEFORE this is called,
+    so slate_df automatically inherits it.
+    """
     if df is None or df.empty:
         return df
-    out  = df.copy()
+
+    out = df.copy()
+
+    # Exclusions
     excl = filters.get('excluded_players', [])
     if excl:
         out = out[~out['Batter'].isin(excl)]
+
+    # Starters only — most important: Today's Best should only show starting players
+    if filters.get('starters_only') and 'Starter' in out.columns:
+        out = out[out['Starter'] == 1]
+
+    # Team filters
+    if filters.get('include_teams'):
+        out = out[out['Team'].isin(filters['include_teams'])]
+    if filters.get('exclude_teams'):
+        out = out[~out['Team'].isin(filters['exclude_teams'])]
+
     return out

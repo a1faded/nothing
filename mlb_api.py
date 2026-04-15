@@ -70,7 +70,58 @@ def get_lineup_status_map() -> dict:
 # ── CONFIRMED LINEUP ──────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
-def get_confirmed_lineup(game_id: int) -> dict:
+def get_confirmed_game_abbrs() -> set:
+    """
+    Returns a set of (away_abbr, home_abbr) tuples for games where BOTH
+    team lineups are confirmed (≥8 batters with battingOrder submitted).
+
+    Uses get_lineup_status_map() which is known-working — the sidebar
+    already shows confirmed ✅ from this function.
+
+    Avoids player-name extraction entirely. Instead matches on team names:
+      - lineup_status_map keys:  "Los Angeles Angels @ New York Yankees"
+      - df['Game']:               "Angels @ Yankees"
+      - NICK_TO_ABBR maps:        'Angels' → 'LAA', 'Yankees' → 'NYY'
+
+    Since every team's nickname is a suffix of its full name (verified for
+    all 30 teams), full_name.endswith(nick) is a reliable match.
+
+    Used by the confirmed_only filter in app.py and get_slate_df() in sidebar.py.
+    """
+    from config import NICK_TO_ABBR
+
+    status_map = get_lineup_status_map()
+    if not status_map:
+        return set()
+
+    # Build full_team_name → abbr from today's schedule
+    # e.g. "Los Angeles Angels" → "LAA"
+    full_to_abbr: dict[str, str] = {}
+    for matchup in status_map:
+        parts = matchup.split(' @ ')
+        if len(parts) != 2:
+            continue
+        for full_name in parts:
+            full_name = full_name.strip()
+            for nick, abbr in NICK_TO_ABBR.items():
+                if full_name.endswith(nick):
+                    full_to_abbr[full_name] = abbr
+                    break
+
+    # Build set of (away_abbr, home_abbr) for confirmed games
+    confirmed: set = set()
+    for matchup, info in status_map.items():
+        if not info.get('confirmed'):
+            continue
+        parts = matchup.split(' @ ')
+        if len(parts) != 2:
+            continue
+        away_abbr = full_to_abbr.get(parts[0].strip())
+        home_abbr = full_to_abbr.get(parts[1].strip())
+        if away_abbr and home_abbr:
+            confirmed.add((away_abbr, home_abbr))
+
+    return confirmed
     if not _STATSAPI_OK or not game_id:
         return {'away':[],'home':[]}
     try:

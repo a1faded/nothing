@@ -4,12 +4,13 @@ config.py — A1PICKS MLB Hit Predictor
 All constants, CONFIG dict, and team/park mappings live here.
 Swap values here only — nothing else needs to change.
 
-FIX: REPO_RAW now uses canonical raw.githubusercontent.com domain
-     (previous github.com/…/raw/main relied on a redirect).
+V5.3 additions:
+  League average benchmarks for Statcast stats (used in engine.py scoring overlay).
+  sc_max_total_adj: maximum post-normalization Statcast adjustment per score (±10 pts).
 """
 
 REPO     = "a1faded/a1picks-hits-bot"
-REPO_RAW = f"https://raw.githubusercontent.com/{REPO}/main"   # ← FIXED
+REPO_RAW = f"https://raw.githubusercontent.com/{REPO}/main"
 REPO_API = f"https://api.github.com/repos/{REPO}/commits"
 
 CONFIG = {
@@ -38,30 +39,56 @@ CONFIG = {
     'gc_qs_anchor':       21.5,
 
     # ── Game conditions architecture ─────────────────────────────────────────
-    'gc_hit_max_range':   0.40,
-    'gc_hr_max_range':    0.35,
-    'gc_reduced_strength':0.30,
-    'gc_max_mult':        0.40,
-    'gc_cap':             0.40,
+    'gc_hit_max_range':    0.40,
+    'gc_hr_max_range':     0.35,
+    'gc_reduced_strength': 0.30,
+    'gc_max_mult':         0.40,
+    'gc_cap':              0.40,
 
     # ── Cache ─────────────────────────────────────────────────────────────────
-    'cache_ttl':          900,
+    'cache_ttl':           900,
 
     # ── Historical tiebreaker ─────────────────────────────────────────────────
-    'hist_min_pa':        10,
-    'hist_bonus_max':     3.0,
+    'hist_min_pa':         10,
+    'hist_bonus_max':      3.0,
 
     # ── Pitcher multiplier anchors ────────────────────────────────────────────
-    'pitcher_hit_neutral':  2.8,
-    'pitcher_hr_neutral':  12.0,
-    'pitcher_walk_neutral':18.0,
-    'pitcher_max_mult':    0.05,
+    'pitcher_hit_neutral':   2.8,
+    'pitcher_hr_neutral':   12.0,
+    'pitcher_walk_neutral': 18.0,
+    'pitcher_max_mult':      0.05,
 
-    # ── League averages (4-year stable) ──────────────────────────────────────
-    'league_k_avg':   22.8,
-    'league_bb_avg':   8.6,
-    'league_hr_avg':   3.15,
-    'league_avg':      0.2445,
+    # ── League averages — BallPark Pal context (4-year stable) ───────────────
+    'league_k_avg':    22.8,
+    'league_bb_avg':    8.6,
+    'league_hr_avg':    3.15,
+    'league_avg':       0.2445,
+
+    # ── League averages — Statcast benchmarks (used in scoring overlay) ───────
+    # Source: MLB 2022-2024 rolling averages (stable across seasons)
+    #
+    # Barrel%   — % of batted balls that are "barreled" (optimal EV + launch angle)
+    # HH%       — % of batted balls with exit velo ≥ 95 mph (hard hit)
+    # AvgEV     — average exit velocity across all batted balls (mph)
+    # maxEV     — maximum recorded exit velocity in the season (mph)
+    # xSLG      — expected slugging percentage based on contact quality
+    # xBA       — expected batting average based on contact quality
+    # xwOBA     — expected weighted on-base average (overall contact value)
+    #
+    # These are the "neutral" midpoints — above = bonus, below = penalty.
+    'league_barrel_pct':  7.5,
+    'league_hh_pct':     38.0,
+    'league_avgev':      88.5,
+    'league_maxev':     108.0,
+    'league_xslg':        0.400,
+    'league_xba':         0.248,
+    'league_xwoba':       0.320,
+
+    # ── Statcast overlay cap ───────────────────────────────────────────────────
+    # Maximum total post-normalization adjustment (±pts) that Statcast can apply.
+    # BallPark Pal simulation is PRIMARY. Statcast is a final quality-of-contact
+    # overlay — meaningful tiebreaker but never overrides the simulation ranking.
+    'sc_max_total_adj':  10.0,
 }
 
 # ── Park name → home team abbreviation (all 30 MLB parks) ─────────────────────

@@ -1,12 +1,14 @@
 """
-app.py — A1PICKS MLB Hit Predictor V5.2
+app.py — A1PICKS MLB Hit Predictor V5.3
 ==========================================
-Entry point. Navigation: Predictor | Player Profile | Parlay Builder | Reference
+V5.3: Statcast enrichment now uses MLBAM IDs (reliable) not just names (fragile).
 
-Changes V5.2:
-  - _build_scored_df() eliminates 3× copy-pasted pipeline
-  - render_player_deep_dive() now called in main_page() with player_id_map
-  - player_id_map built once per page load (3600s cache in mlb_api)
+After _build_scored_df() (which does a name-based Statcast join), we now call
+enrich_slate_with_statcast(df, player_id_map) which fills any remaining NaN
+Statcast columns using the pre-cached leaderboard dict keyed by MLBAM ID.
+
+This means players whose BallPark Pal names don't match FanGraphs names
+(accents, Jr./Sr., hyphens) still get their Barrel%, HH%, xBA etc.
 """
 
 import streamlit as st
@@ -43,9 +45,8 @@ inject_css()
 def _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
                      use_park: bool = True, use_gc: bool = True):
     """
-    Single authoritative scoring pipeline used by all three pages.
-    The four loader calls are individually @st.cache_data cached — only
-    the pandas computation reruns when use_park / use_gc change.
+    Single scoring pipeline. Includes Tier-1 name-based Statcast join.
+    Gaps filled by enrich_slate_with_statcast() (Tier-2, ID-based) afterward.
     """
     df = compute_metrics(raw_df, use_park=use_park)
     df = merge_pitcher_data(df, pitcher_df)
@@ -61,13 +62,28 @@ def _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
 
 
 def _get_player_id_map(df) -> dict:
-    """Build batter → MLBAM ID map. Cached for 1h inside mlb_api."""
+    """Build batter → MLBAM ID map. Cached 1h in mlb_api."""
     try:
         from mlb_api import build_player_id_map
         names = tuple(sorted(df['Batter'].unique().tolist()))
         return build_player_id_map(names)
     except Exception:
         return {}
+
+
+def _enrich_with_ids(df, player_id_map: dict):
+    """
+    Tier-2 Statcast enrichment using MLBAM IDs.
+    Fills any NaN Statcast columns that the name-based join missed.
+    Returns enriched df (or original if enrich fails).
+    """
+    if not player_id_map:
+        return df
+    try:
+        from savant import enrich_slate_with_statcast
+        return enrich_slate_with_statcast(df, player_id_map)
+    except Exception:
+        return df
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PREDICTOR PAGE
@@ -94,7 +110,11 @@ def main_page():
             use_gc=filters.get('use_gc', True),
         )
 
-    # Promote GC score column when game conditions are active
+        # Build player ID map and enrich df with ID-based Statcast data
+        player_id_map = _get_player_id_map(df)
+        df = _enrich_with_ids(df, player_id_map)
+
+    # Promote GC score column when active
     if filters.get('use_gc', False):
         gc_col = filters['score_col'] + '_gc'
         if gc_col in df.columns:
@@ -135,12 +155,8 @@ def main_page():
     render_results_table(filtered_df, filters)
     render_best_per_target(slate_df, filters)
 
-    # ── Player Deep Dive panel (game log + rolling Statcast) ─────────────────
     if not filtered_df.empty:
-        player_id_map = _get_player_id_map(df)
         render_player_deep_dive(filtered_df, player_id_map)
-
-    if not filtered_df.empty:
         render_visualizations(df, filtered_df, filters['score_col_base'])
 
     st.markdown("---")
@@ -181,7 +197,6 @@ def main():
         index=0
     )
 
-    # Load all four CSVs once — each is individually @st.cache_data cached
     raw_df     = load_matchups()
     pitcher_df = load_pitcher_data()
     game_cond  = load_game_conditions()
@@ -197,19 +212,20 @@ def main():
             with st.spinner("Loading slate data…"):
                 df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
                                       use_park=True, use_gc=True)
+                player_id_map = _get_player_id_map(df)
+                df = _enrich_with_ids(df, player_id_map)
             filters = {
                 'use_gc': True, 'use_park': True,
                 'score_col': 'Hit_Score', 'score_col_base': 'Hit_Score',
             }
-            player_id_map = _get_player_id_map(df)
             player_profile_page(df, player_id_map, filters)
 
     elif page == "⚡ Parlay Builder":
         if raw_df is None:
             st.error("❌ Could not load data for Parlay Builder.")
         else:
-            df   = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
-                                    use_park=True, use_gc=True)
+            df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
+                                  use_park=True, use_gc=True)
             excl = st.session_state.get('excluded_players', [])
             if excl:
                 df = df[~df['Batter'].isin(excl)]
@@ -220,7 +236,7 @@ def main():
 
     render_lineup_status_sidebar()
     st.sidebar.markdown("---")
-    st.sidebar.caption("V5.2 · BallPark Pal + MLB Stats API + Statcast")
+    st.sidebar.caption("V5.3 · BallPark Pal + MLB Stats API + Statcast")
 
 
 if __name__ == "__main__":

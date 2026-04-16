@@ -25,9 +25,59 @@ from engine import gc_adjusted_score
 
 def _build_all_combos(pool: pd.DataFrame, leg_bets: list, sgp: bool,
                       locked: list, env_filter: bool) -> list:
-    """Build ALL valid combos ranked by harmonic mean confidence."""
-    legs = len(leg_bets)
+    """
+    Build valid combos ranked by harmonic mean confidence.
 
+    Performance fixes for 4-leg parlays:
+      1. Pre-index pool by batter into dicts — O(1) lookups vs O(n) DataFrame scan.
+         Old: pool[pool['Batter'] == b] inside inner loop = 166K scans for 4 legs.
+         New: batter_game[b] / batter_scores[b][sc] = dict lookup, effectively free.
+
+      2. Adaptive candidate count — fewer candidates for more legs.
+         2 legs: 14 candidates → 14^2 =    196 combos
+         3 legs: 10 candidates → 10^3 =  1,000 combos
+         4 legs:  7 candidates →  7^4 =  2,401 combos  (was 12^4 = 20,736)
+
+      3. Generator + early exit — stop once we have MAX_KEEP good combos.
+         No need to evaluate all combinations when we only show top-50.
+    """
+    MAX_KEEP = 50
+    legs     = len(leg_bets)
+
+    # ── Pre-index pool into dicts for O(1) lookups ────────────────────────────
+    batter_game:   dict[str, str]              = {}
+    batter_scores: dict[str, dict[str, float]] = {}
+
+    for _, row in pool.iterrows():
+        b = row['Batter']
+        batter_game[b] = row.get('Game', '')
+        if b not in batter_scores:
+            batter_scores[b] = {}
+        for sc in set(leg_bets):
+            if sc in row.index:
+                batter_scores[b][sc] = float(row.get(sc, 0) or 0)
+
+    # ── Adaptive candidate count ──────────────────────────────────────────────
+    cand_per_leg = {2: 14, 3: 10, 4: 7}.get(legs, 8)
+
+    # ── Pre-compute GC scores for all unique score types in one pass ─────────
+    # For same-bet mode leg_bets = ['Hit_Score','Hit_Score','Hit_Score']
+    # → unique_scs = ['Hit_Score'] → only 1 GC computation regardless of legs
+    # For mixed-bet leg_bets = ['Hit_Score','HR_Score','XB_Score']
+    # → unique_scs = ['Hit_Score','HR_Score','XB_Score'] → 3 computations
+    unique_scs = list(dict.fromkeys(leg_bets))   # preserves order, deduplicates
+    gc_by_sc: dict[str, dict[str, float]] = {}
+
+    for sc in unique_scs:
+        gs = gc_adjusted_score(pool, sc, use_gc=env_filter)
+        sc_map: dict[str, float] = {}
+        # Use Series .items() — much faster than pool.iterrows()
+        for idx, b in pool['Batter'].items():
+            if b not in sc_map:
+                sc_map[b] = float(gs.loc[idx] if idx in gs.index else 0)
+        gc_by_sc[sc] = sc_map
+
+    # ── Build candidate lists ─────────────────────────────────────────────────
     if sgp:
         primary_sc = leg_bets[0]
         ranked     = pool.sort_values(primary_sc, ascending=False)
@@ -35,71 +85,107 @@ def _build_all_combos(pool: pd.DataFrame, leg_bets: list, sgp: bool,
         if locked:
             candidates = ([p for p in locked if p in candidates] +
                           [p for p in candidates if p not in locked])
-        all_combos_raw = list(itertools.combinations(
-            candidates[:min(10, len(candidates))], legs))
-        leg_candidates = None
+        top_cands      = candidates[:min(cand_per_leg + 3, len(candidates))]
+        all_combos_gen = itertools.combinations(top_cands, legs)
 
     else:
         leg_candidates = []
         for sc in leg_bets:
-            if sc not in pool.columns:
-                return []
-            gc_sc = gc_adjusted_score(pool, sc, use_gc=env_filter)
-            ps = pool.copy()
-            ps['_gc_adj'] = gc_sc.values
+            sc_map = gc_by_sc[sc]
+
+            scored_batters = sorted(
+                pool['Batter'].unique().tolist(),
+                key=lambda b: sc_map.get(b, 0),
+                reverse=True
+            )
             if locked:
-                ps['_locked'] = ps['Batter'].isin(locked).astype(int)
-                ps = ps.sort_values(['_locked', '_gc_adj'], ascending=[False, False])
-            else:
-                ps = ps.sort_values('_gc_adj', ascending=False)
-            per_game = ps.drop_duplicates(subset='Game').head(12)
-            leg_candidates.append(per_game)
-
-        all_combos_raw = list(itertools.product(
-            *[lc['Batter'].tolist() for lc in leg_candidates]))
-
-    ranked_combos = []
-
-    for combo in all_combos_raw:
-        if len(set(combo)) < legs:
-            continue   # repeated player across legs
-
-        if not sgp:
-            # ── FIX: resolve game from `pool`, not from leg_candidates ────────
-            # Previously looked up from cand (per-leg subset) which failed when
-            # a locked/promoted player wasn't in that leg's candidate list.
-            games_in_combo = []
-            valid = True
-            for batter in combo:
-                row = pool[pool['Batter'] == batter]
-                if row.empty:
-                    valid = False
+                scored_batters = (
+                    [p for p in locked if p in scored_batters] +
+                    [p for p in scored_batters if p not in locked]
+                )
+            # One candidate per game, up to cand_per_leg
+            seen_games: set = set()
+            cands: list     = []
+            for b in scored_batters:
+                g = batter_game.get(b, '')
+                if g and g not in seen_games:
+                    seen_games.add(g)
+                    cands.append(b)
+                if len(cands) >= cand_per_leg:
                     break
-                games_in_combo.append(row.iloc[0]['Game'])
-            if not valid or len(set(games_in_combo)) < legs:
-                continue  # players from same game, or missing batter
+            leg_candidates.append(cands)
 
-        # ── Score lookup — always from pool ───────────────────────────────────
-        scores = []
-        valid  = True
+        all_combos_gen = itertools.product(*leg_candidates)
+
+    # ── Evaluate combos with early exit ──────────────────────────────────────
+    ranked_combos: list = []
+
+    for combo in all_combos_gen:
+        # Reject repeated players
+        if len(set(combo)) < legs:
+            continue
+
+        # Cross-game: all players must be from different games
+        if not sgp:
+            games = [batter_game.get(b, '') for b in combo]
+            if len(set(games)) < legs or '' in games:
+                continue
+
+        # Score lookup — all O(1) dict access now
+        scores: list = []
+        valid = True
         for batter, sc in zip(combo, leg_bets):
-            row = pool[pool['Batter'] == batter]
-            if row.empty or sc not in row.columns:
+            s = batter_scores.get(batter, {}).get(sc, 0)
+            if s <= 0:
                 valid = False
                 break
-            scores.append(float(row[sc].values[0]))
+            scores.append(s)
         if not valid:
             continue
 
         # Harmonic mean — penalises weak legs heavily
-        conf = (
-            len(scores) / sum(1 / s for s in scores if s > 0)
-            if all(s > 0 for s in scores) else 0
-        )
+        conf = len(scores) / sum(1 / s for s in scores)
         ranked_combos.append((combo, scores, conf))
 
+        # Early exit — no point evaluating more once we have MAX_KEEP
+        if len(ranked_combos) >= MAX_KEEP * 4:
+            break
+
     ranked_combos.sort(key=lambda x: x[2], reverse=True)
-    return ranked_combos
+
+    # ── Diversity pass ────────────────────────────────────────────────────────
+    # Prevent any single player from appearing in every combo.
+    # Problem: a player with score=100 maximises harmonic mean of any combo
+    # containing them, so they appear in ALL top-N results — unnatural and
+    # unhelpful for exploring alternatives.
+    #
+    # Solution: after ranking, cap each player to MAX_PER_PLAYER appearances
+    # across the final returned combos. Combos that would exceed the cap are
+    # deferred to a "backfill" list shown after the diverse set.
+    # This preserves quality ordering while ensuring variety.
+    MAX_PER_PLAYER = max(2, MAX_KEEP // (legs * 2))   # ~4 for 3-leg, ~3 for 4-leg
+
+    diverse:  list = []
+    deferred: list = []
+    player_count: dict[str, int] = {}
+
+    for combo, scores, conf in ranked_combos:
+        over_limit = any(player_count.get(b, 0) >= MAX_PER_PLAYER for b in combo)
+        if over_limit:
+            deferred.append((combo, scores, conf))
+        else:
+            for b in combo:
+                player_count[b] = player_count.get(b, 0) + 1
+            diverse.append((combo, scores, conf))
+        if len(diverse) >= MAX_KEEP:
+            break
+
+    # Pad with deferred combos if we don't have enough diverse ones
+    result = diverse
+    if len(result) < MAX_KEEP:
+        result = result + deferred[:MAX_KEEP - len(result)]
+
+    return result[:MAX_KEEP]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONTEXT PANEL
@@ -243,8 +329,8 @@ def _show_parlay_card(combo_batters, combo_scores, leg_bets, conf,
           <div class="leg-score" style="color:{col_css}">{lbl} &nbsp; {score:.1f}</div>
           <div style="margin-top:.45rem">
             <div class="pcard-row"><span class="pk">Hit Prob</span><span class="pv">{_s('total_hit_prob'):.1f}%</span></div>
-            <div class="pcard-row"><span class="pk">1B/XB/HR</span><span class="pv">{_s('p_1b'):.1f}/{_s('p_xb'):.1f}/{_s('p_hr'):.1f}%</span></div>
-            <div class="pcard-row"><span class="pk">K%</span><span class="pv">{_s('p_k'):.1f}% <span class="{k_cls}">({k_lg:+.1f})</span></span></div>
+            <div class="pcard-row"><span class="pk">1B / XB / HR</span><span class="pv">{_s('p_1b'):.1f} / {_s('p_xb'):.1f} / {_s('p_hr'):.1f}%</span></div>
+            <div class="pcard-row"><span class="pk">K%</span><span class="pv {k_cls}">{_s('p_k'):.1f}% ({k_lg:+.1f} vs lg)</span></div>
             <div class="pcard-row"><span class="pk">HR vs Lg</span><span class="pv {hr_cls}">{hr_lg:+.2f}%</span></div>
             <div class="pcard-row"><span class="pk">vs Grade</span><span class="pv">{int(_s('vs Grade'))}</span></div>
             {cond_str}{hist_row}

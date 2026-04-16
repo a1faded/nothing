@@ -26,25 +26,39 @@ from engine import gc_adjusted_score
 def _build_all_combos(pool: pd.DataFrame, leg_bets: list, sgp: bool,
                       locked: list, env_filter: bool) -> list:
     """
-    Build valid combos ranked by harmonic mean confidence.
+    Professional diverse combo generation.
 
-    Performance fixes for 4-leg parlays:
-      1. Pre-index pool by batter into dicts — O(1) lookups vs O(n) DataFrame scan.
-         Old: pool[pool['Batter'] == b] inside inner loop = 166K scans for 4 legs.
-         New: batter_game[b] / batter_scores[b][sc] = dict lookup, effectively free.
+    Architecture — three clean phases:
 
-      2. Adaptive candidate count — fewer candidates for more legs.
-         2 legs: 14 candidates → 14^2 =    196 combos
-         3 legs: 10 candidates → 10^3 =  1,000 combos
-         4 legs:  7 candidates →  7^4 =  2,401 combos  (was 12^4 = 20,736)
+    PHASE 1  Pre-index  Build {batter: game} and {batter: {sc: score}} dicts
+                        once before any combo work. All lookups O(1).
 
-      3. Generator + early exit — stop once we have MAX_KEEP good combos.
-         No need to evaluate all combinations when we only show top-50.
+    PHASE 2  Generate   Produce ALL valid combos (no early exit).
+                        Reduced candidate counts keep this fast:
+                          2-leg: 12^2 =   144 combos
+                          3-leg:  9^3 =   729 combos
+                          4-leg:  6^4 = 1,296 combos
+                        Each validity check is pure dict access.
+
+    PHASE 3  Rank + diversify
+                        Sort by harmonic mean (penalises weak legs heavily).
+                        Apply strict exposure cap: each player appears in at
+                        most MAX_PER_PLAYER of the returned combos.
+                        No deferred fallback — that was what re-introduced the
+                        dominant player after filtering.
+                        If strict cap yields < MIN_RESULTS, relax cap × 3.
+
+    Why no early exit:
+        itertools.product cycles last-list fastest, so the top player in leg-1
+        appears in ALL first N^(legs-1) combos. An early exit at 200 means
+        we never see the non-dominant combos. Generating all valid combos and
+        sorting first is the only correct approach.
     """
-    MAX_KEEP = 50
-    legs     = len(leg_bets)
+    MAX_KEEP    = 50
+    MIN_RESULTS = 15    # relax exposure if we get fewer than this
+    legs        = len(leg_bets)
 
-    # ── Pre-index pool into dicts for O(1) lookups ────────────────────────────
+    # ── PHASE 1: Pre-index ────────────────────────────────────────────────────
     batter_game:   dict[str, str]              = {}
     batter_scores: dict[str, dict[str, float]] = {}
 
@@ -57,27 +71,21 @@ def _build_all_combos(pool: pd.DataFrame, leg_bets: list, sgp: bool,
             if sc in row.index:
                 batter_scores[b][sc] = float(row.get(sc, 0) or 0)
 
-    # ── Adaptive candidate count ──────────────────────────────────────────────
-    cand_per_leg = {2: 14, 3: 10, 4: 7}.get(legs, 8)
-
-    # ── Pre-compute GC scores for all unique score types in one pass ─────────
-    # For same-bet mode leg_bets = ['Hit_Score','Hit_Score','Hit_Score']
-    # → unique_scs = ['Hit_Score'] → only 1 GC computation regardless of legs
-    # For mixed-bet leg_bets = ['Hit_Score','HR_Score','XB_Score']
-    # → unique_scs = ['Hit_Score','HR_Score','XB_Score'] → 3 computations
-    unique_scs = list(dict.fromkeys(leg_bets))   # preserves order, deduplicates
+    # Compute GC scores for unique bet types in one Series pass each
+    unique_scs  = list(dict.fromkeys(leg_bets))
     gc_by_sc: dict[str, dict[str, float]] = {}
-
     for sc in unique_scs:
-        gs = gc_adjusted_score(pool, sc, use_gc=env_filter)
+        gs     = gc_adjusted_score(pool, sc, use_gc=env_filter)
         sc_map: dict[str, float] = {}
-        # Use Series .items() — much faster than pool.iterrows()
         for idx, b in pool['Batter'].items():
             if b not in sc_map:
                 sc_map[b] = float(gs.loc[idx] if idx in gs.index else 0)
         gc_by_sc[sc] = sc_map
 
-    # ── Build candidate lists ─────────────────────────────────────────────────
+    # Smaller candidate pool → fewer combos → fast even without early exit
+    cand_per_leg = {2: 12, 3: 9, 4: 6}.get(legs, 7)
+
+    # ── PHASE 2: Generate all valid combos ────────────────────────────────────
     if sgp:
         primary_sc = leg_bets[0]
         ranked     = pool.sort_values(primary_sc, ascending=False)
@@ -85,28 +93,25 @@ def _build_all_combos(pool: pd.DataFrame, leg_bets: list, sgp: bool,
         if locked:
             candidates = ([p for p in locked if p in candidates] +
                           [p for p in candidates if p not in locked])
-        top_cands      = candidates[:min(cand_per_leg + 3, len(candidates))]
-        all_combos_gen = itertools.combinations(top_cands, legs)
-
+        top_cands  = candidates[:min(cand_per_leg + 4, len(candidates))]
+        combo_iter = itertools.combinations(top_cands, legs)
     else:
-        leg_candidates = []
+        leg_candidates: list[list[str]] = []
         for sc in leg_bets:
             sc_map = gc_by_sc[sc]
-
-            scored_batters = sorted(
+            sorted_batters = sorted(
                 pool['Batter'].unique().tolist(),
                 key=lambda b: sc_map.get(b, 0),
                 reverse=True
             )
             if locked:
-                scored_batters = (
-                    [p for p in locked if p in scored_batters] +
-                    [p for p in scored_batters if p not in locked]
+                sorted_batters = (
+                    [p for p in locked if p in sorted_batters] +
+                    [p for p in sorted_batters if p not in locked]
                 )
-            # One candidate per game, up to cand_per_leg
-            seen_games: set = set()
-            cands: list     = []
-            for b in scored_batters:
+            seen_games: set  = set()
+            cands:      list = []
+            for b in sorted_batters:
                 g = batter_game.get(b, '')
                 if g and g not in seen_games:
                     seen_games.add(g)
@@ -114,78 +119,60 @@ def _build_all_combos(pool: pd.DataFrame, leg_bets: list, sgp: bool,
                 if len(cands) >= cand_per_leg:
                     break
             leg_candidates.append(cands)
+        combo_iter = itertools.product(*leg_candidates)
 
-        all_combos_gen = itertools.product(*leg_candidates)
-
-    # ── Evaluate combos with early exit ──────────────────────────────────────
-    ranked_combos: list = []
-
-    for combo in all_combos_gen:
-        # Reject repeated players
+    all_valid: list = []
+    for combo in combo_iter:
+        # Reject repeated players across legs
         if len(set(combo)) < legs:
             continue
-
-        # Cross-game: all players must be from different games
+        # Cross-game: enforce different game per leg
         if not sgp:
             games = [batter_game.get(b, '') for b in combo]
             if len(set(games)) < legs or '' in games:
                 continue
-
-        # Score lookup — all O(1) dict access now
-        scores: list = []
-        valid = True
+        # Score all legs
+        scores: list[float] = []
+        ok = True
         for batter, sc in zip(combo, leg_bets):
             s = batter_scores.get(batter, {}).get(sc, 0)
             if s <= 0:
-                valid = False
+                ok = False
                 break
             scores.append(s)
-        if not valid:
+        if not ok:
             continue
+        conf = len(scores) / sum(1 / s for s in scores)   # harmonic mean
+        all_valid.append((combo, scores, conf))
 
-        # Harmonic mean — penalises weak legs heavily
-        conf = len(scores) / sum(1 / s for s in scores)
-        ranked_combos.append((combo, scores, conf))
+    # ── PHASE 3: Rank then diversify ─────────────────────────────────────────
+    all_valid.sort(key=lambda x: x[2], reverse=True)
 
-        # Early exit — no point evaluating more once we have MAX_KEEP
-        if len(ranked_combos) >= MAX_KEEP * 4:
-            break
-
-    ranked_combos.sort(key=lambda x: x[2], reverse=True)
-
-    # ── Diversity pass ────────────────────────────────────────────────────────
-    # Prevent any single player from appearing in every combo.
-    # Problem: a player with score=100 maximises harmonic mean of any combo
-    # containing them, so they appear in ALL top-N results — unnatural and
-    # unhelpful for exploring alternatives.
-    #
-    # Solution: after ranking, cap each player to MAX_PER_PLAYER appearances
-    # across the final returned combos. Combos that would exceed the cap are
-    # deferred to a "backfill" list shown after the diverse set.
-    # This preserves quality ordering while ensuring variety.
-    MAX_PER_PLAYER = max(2, MAX_KEEP // (legs * 2))   # ~4 for 3-leg, ~3 for 4-leg
-
-    diverse:  list = []
-    deferred: list = []
-    player_count: dict[str, int] = {}
-
-    for combo, scores, conf in ranked_combos:
-        over_limit = any(player_count.get(b, 0) >= MAX_PER_PLAYER for b in combo)
-        if over_limit:
-            deferred.append((combo, scores, conf))
-        else:
+    def _apply_exposure(combos, max_per_player):
+        """Return top-MAX_KEEP combos with each player capped at max_per_player."""
+        result:       list         = []
+        player_count: dict[str,int] = {}
+        for combo, scores, conf in combos:
+            if any(player_count.get(b, 0) >= max_per_player for b in combo):
+                continue
             for b in combo:
                 player_count[b] = player_count.get(b, 0) + 1
-            diverse.append((combo, scores, conf))
-        if len(diverse) >= MAX_KEEP:
-            break
+            result.append((combo, scores, conf))
+            if len(result) >= MAX_KEEP:
+                break
+        return result
 
-    # Pad with deferred combos if we don't have enough diverse ones
-    result = diverse
-    if len(result) < MAX_KEEP:
-        result = result + deferred[:MAX_KEEP - len(result)]
+    # Strict: each player in at most 3 combos
+    # Rationale: with 50 combos, seeing Adell 3× is plenty — you've explored
+    # his best pairings; subsequent combos should feature other options.
+    result = _apply_exposure(all_valid, max_per_player=3)
 
-    return result[:MAX_KEEP]
+    # Relax to 8 if strict cap yields too few combos
+    if len(result) < MIN_RESULTS:
+        result = _apply_exposure(all_valid, max_per_player=8)
+
+    # Final fallback: return however many we have (no deferred padding)
+    return result
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONTEXT PANEL

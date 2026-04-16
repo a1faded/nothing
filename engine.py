@@ -401,6 +401,24 @@ def compute_game_condition_scores(df: pd.DataFrame, use_gc: bool=True) -> pd.Dat
     df['Single_Score_gc'] = normalize_0_100(df['Single_Score'] * hit_mult)
     df['XB_Score_gc']     = normalize_0_100(df['XB_Score']     * hit_mult)
     df['HR_Score_gc']     = normalize_0_100(df['HR_Score']      * hr_mult)
+
+    # ── Hot park extra boost ──────────────────────────────────────────────────
+    # When gc_hr4 > 2× league median (12.2%), a game environment is genuinely
+    # elevated — the whole lineup benefits, not just one player.
+    # Data shows: Reds (GABP), Angels, Rays, Braves all had 3+ HRs in same game.
+    # We add a flat +1.5 pts to HR_Score_gc for every batter in that game.
+    # This surfaces more players from hot-park games, not just the top-1 scorer.
+    # Cap at +1.5 pts total — small enough to not override individual quality.
+    if use_gc:
+        hot_park_threshold = CONFIG['gc_hr4_anchor'] * 2.0   # 2× median = 24.4%
+        hot_park_mask      = df['gc_hr4'] > hot_park_threshold
+        if hot_park_mask.any():
+            boost = CONFIG.get('hot_park_boost', 1.5)
+            df.loc[hot_park_mask, 'HR_Score_gc'] = (
+                (df.loc[hot_park_mask, 'HR_Score_gc'] + boost)
+                .clip(0, 100).round(1)
+            )
+
     return df
 
 

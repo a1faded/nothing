@@ -50,6 +50,12 @@ CONFIG = {
     # ── Statcast overlay cap ──────────────────────────────────────────────────
     'sc_max_total_adj': 10.0,
 
+    # ── Hot park extra boost (gc_hr4 > 2× median = 24.4%) ────────────────────
+    # Applied as flat +pts to HR_Score_gc for ALL batters in that game.
+    # Rewards entire lineups in genuinely HR-friendly park/game environments.
+    # Evidence: multiple same-team HR clusters when gc_hr4 is very elevated.
+    'hot_park_boost': 1.5,
+
     # ── Batting order position signal ─────────────────────────────────────────
     # Applied post-normalization. Only active when confirmed lineup is available.
     # Cleanup (3-5): +bonus HR/XB.  Table-setters (1-2): +bonus Hit/Single.

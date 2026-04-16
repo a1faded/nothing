@@ -73,7 +73,7 @@ def _get_savant_leaderboard(season: int) -> dict:
 
     # ── Exit velo / barrels ────────────────────────────────────────────────
     try:
-        ev_df = statcast_batter_exitvelo_barrels(season, minBBE=5)
+        ev_df = statcast_batter_exitvelo_barrels(season, minBBE=3)
         if ev_df is not None and not ev_df.empty:
             ev_df.columns = [c.lower() for c in ev_df.columns]
 
@@ -103,7 +103,7 @@ def _get_savant_leaderboard(season: int) -> dict:
 
     # ── Expected stats ────────────────────────────────────────────────────
     try:
-        xs_df = statcast_batter_expected_stats(season, minPA=5)
+        xs_df = statcast_batter_expected_stats(season, minPA=3)
         if xs_df is not None and not xs_df.empty:
             xs_df.columns = [c.lower() for c in xs_df.columns]
 

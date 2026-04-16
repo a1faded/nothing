@@ -279,29 +279,78 @@ def get_recent_batting_form(days: int = 7) -> dict:
 # ── PLAYER GAME LOG ───────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=600)
-def get_player_game_log(player_id: int, last_n: int = 10) -> pd.DataFrame:
+def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:
+    """
+    Game-by-game hitting log via MLB Stats API gameLog hydration.
+
+    API structure (verified):
+      split['date']              → 'YYYY-MM-DD' at top level of split
+      split['game']['gamePk']    → game ID (no 'gameDate' key exists here)
+      split['opponent']['name']  → full team name, no 'abbreviation' key
+      split['stat']              → hitting stats dict
+
+    Previous bugs:
+      - entry.get('game',{}).get('gameDate') → key doesn't exist → empty date
+      - entry.get('opponent',{}).get('abbreviation') → key doesn't exist → '?'
+    """
     if not _STATSAPI_OK or not player_id:
         return pd.DataFrame()
+
+    # Build team name → abbreviation lookup for opponent display
+    from config import NICK_TO_ABBR
+    # Reverse: last word of full name → abbr (e.g. "Angels" → "LAA")
+    name_to_abbr = {nick: abbr for nick, abbr in NICK_TO_ABBR.items()}
+
+    def _abbr_from_name(full_name: str) -> str:
+        """Extract abbreviation from full team name using last word."""
+        if not full_name:
+            return '?'
+        last_word = full_name.strip().split()[-1]
+        # Handle "White Sox", "Red Sox", "Blue Jays" — check 2-word suffixes too
+        words = full_name.strip().split()
+        two_word = ' '.join(words[-2:]) if len(words) >= 2 else ''
+        return (name_to_abbr.get(two_word)
+                or name_to_abbr.get(last_word)
+                or full_name[:3].upper())
+
     year = date.today().year
     try:
-        raw    = statsapi.get('people',{'personIds':player_id,
-                              'hydrate':f'stats(type=gameLog,season={year},group=hitting)'})
+        raw = statsapi.get('people', {
+            'personIds': player_id,
+            'hydrate':   f'stats(type=gameLog,season={year},group=hitting)',
+        })
         splits = []
-        for sb in (raw.get('people') or [{}])[0].get('stats',[]):
-            if sb.get('type',{}).get('displayName') == 'gameLog':
-                splits = sb.get('splits',[]); break
+        for sb in (raw.get('people') or [{}])[0].get('stats', []):
+            if sb.get('type', {}).get('displayName') == 'gameLog':
+                splits = sb.get('splits', [])
+                break
+
         rows = []
+        # reversed() → most recent first
         for entry in reversed(splits):
-            s = entry.get('stat',{})
-            rows.append({'Date': entry.get('game',{}).get('gameDate','')[:10],
-                         'Opp':  entry.get('opponent',{}).get('abbreviation','?'),
-                         'AB':_i(s.get('atBats',0)),'H':_i(s.get('hits',0)),
-                         '2B':_i(s.get('doubles',0)),'3B':_i(s.get('triples',0)),
-                         'HR':_i(s.get('homeRuns',0)),'RBI':_i(s.get('rbi',0)),
-                         'BB':_i(s.get('baseOnBalls',0)),'K':_i(s.get('strikeOuts',0)),
-                         'AVG':s.get('avg','.000')})
+            s    = entry.get('stat', {})
+            # FIX 1: date is a top-level key in the split, NOT inside 'game'
+            date_str = entry.get('date', '')
+            # FIX 2: opponent has 'name' not 'abbreviation'
+            opp_name = entry.get('opponent', {}).get('name', '')
+            opp_abbr = _abbr_from_name(opp_name)
+
+            rows.append({
+                'Date': date_str,          # 'YYYY-MM-DD' or '' if missing
+                'Opp':  opp_abbr,
+                'AB':   _i(s.get('atBats',    0)),
+                'H':    _i(s.get('hits',       0)),
+                '2B':   _i(s.get('doubles',    0)),
+                '3B':   _i(s.get('triples',    0)),
+                'HR':   _i(s.get('homeRuns',   0)),
+                'RBI':  _i(s.get('rbi',        0)),
+                'BB':   _i(s.get('baseOnBalls',0)),
+                'K':    _i(s.get('strikeOuts', 0)),
+                'AVG':  s.get('avg', '.000'),
+            })
             if len(rows) >= last_n:
                 break
+
         return pd.DataFrame(rows) if rows else pd.DataFrame()
     except Exception:
         return pd.DataFrame()

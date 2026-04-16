@@ -499,13 +499,17 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
                     log_df = get_player_game_log(player_id, last_n=15)
 
                 if not log_df.empty:
-                    # Colour H column: green when got a hit
                     def _hit_style(val):
                         if isinstance(val, (int, float)) and val > 0:
                             return 'color:#10b981;font-weight:700'
                         return ''
 
-                    # Add mini form summary above table
+                    def _ha_style(val):
+                        if val == 'Home': return 'color:#60a5fa;font-weight:600'
+                        if val == 'Away': return 'color:#94a3b8'
+                        return ''
+
+                    # Mini form summary + home/away splits
                     if 'H' in log_df.columns and 'AB' in log_df.columns:
                         played    = len(log_df[log_df['AB'] > 0])
                         hit_games = len(log_df[log_df['H'] > 0])
@@ -523,17 +527,40 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
                             if form_tag else ""
                         )
                         st.markdown(
-                            f'<div style="font-size:.82rem;color:#94a3b8;margin-bottom:.5rem">'
-                            f'Last {played} games: '
+                            f'<div style="font-size:.82rem;color:#94a3b8;margin-bottom:.35rem">'
+                            f'Last {played} G: '
                             f'<span style="color:{rclr};font-weight:700">'
-                            f'{hit_games} games with a hit ({rate:.0%})</span> · '
-                            f'{int(total_h)} H · {int(total_hr)} HR{tag_html}</div>',
+                            f'{hit_games} with a hit ({rate:.0%})</span>'
+                            f' · {int(total_h)} H · {int(total_hr)} HR{tag_html}</div>',
                             unsafe_allow_html=True
                         )
+
+                        # Home / Away split summary when H/A column present
+                        if 'H/A' in log_df.columns:
+                            home_df = log_df[(log_df['H/A'] == 'Home') & (log_df['AB'] > 0)]
+                            away_df = log_df[(log_df['H/A'] == 'Away') & (log_df['AB'] > 0)]
+
+                            def _split_str(sub):
+                                if sub.empty: return "—"
+                                g  = len(sub)
+                                h  = int(sub['H'].sum())
+                                hr = int(sub['HR'].sum())
+                                hg = len(sub[sub['H'] > 0])
+                                return f"{hg}/{g} G w/H · {h} H · {hr} HR"
+
+                            st.markdown(
+                                f'<div style="font-size:.76rem;color:#64748b;margin-bottom:.5rem">'
+                                f'<span style="color:#60a5fa;font-weight:600">🏠 Home</span> {_split_str(home_df)}'
+                                f' &nbsp;·&nbsp; '
+                                f'<span style="color:#94a3b8;font-weight:600">✈️ Away</span> {_split_str(away_df)}'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
 
                     styled_log = (
                         log_df.style
                         .map(_hit_style, subset=['H'])
+                        .map(_ha_style,  subset=['H/A'] if 'H/A' in log_df.columns else [])
                         .format({'AVG': '{}'})
                     )
                     st.dataframe(styled_log, width='stretch', hide_index=True)

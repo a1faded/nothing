@@ -329,14 +329,18 @@ def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:
         # reversed() → most recent first
         for entry in reversed(splits):
             s    = entry.get('stat', {})
-            # FIX 1: date is a top-level key in the split, NOT inside 'game'
+            # date is a top-level key in the split, NOT inside 'game'
             date_str = entry.get('date', '')
-            # FIX 2: opponent has 'name' not 'abbreviation'
+            # opponent has 'name' not 'abbreviation'
             opp_name = entry.get('opponent', {}).get('name', '')
             opp_abbr = _abbr_from_name(opp_name)
+            # isHome is a top-level boolean in the split
+            is_home  = entry.get('isHome', None)
+            ha       = 'Home' if is_home is True else 'Away' if is_home is False else '—'
 
             rows.append({
-                'Date': date_str,          # 'YYYY-MM-DD' or '' if missing
+                'Date': date_str,
+                'H/A':  ha,
                 'Opp':  opp_abbr,
                 'AB':   _i(s.get('atBats',    0)),
                 'H':    _i(s.get('hits',       0)),

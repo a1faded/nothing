@@ -242,29 +242,14 @@ def enrich_with_props(df: pd.DataFrame, player_id_map: dict,
 
 def edge_badge(under_score: float, tb_under_pct: float) -> str:
     """
-    Compare our model's under confidence to the market's implied probability.
-
-    Philosophy: market disagreement is an OPPORTUNITY signal, not a red flag.
-    Our model is primary. This badge is informational context.
-
-    under_score:   0–100, our Under_TB15_Score or Under_XB_Score
-    tb_under_pct:  0–100, market implied probability of under cashing
-
-    Badge meanings:
-      ✅ CONFIRMED    — both model and market agree on under (validation)
-      ⚡ EDGE         — model strongly favours under, market doesn't (opportunity)
-      ↔️ NEUTRAL      — model and market roughly aligned, no clear edge
-      🔄 CONTRARIAN   — market heavily favours under but model doesn't
-                        (market may be right, but our model disagrees — worth noting)
+    HTML badge version — for use in st.markdown() contexts only.
+    For st.dataframe() use edge_label() instead.
     """
     if tb_under_pct <= 0 or pd.isna(tb_under_pct):
         return ""
 
-    # Convert our model score to a rough "confidence" percentage
-    # Under_Score of 75 ≈ 75% model confidence in the under
     model_pct = under_score
-
-    diff = model_pct - tb_under_pct   # positive = model likes under more than market
+    diff      = model_pct - tb_under_pct
 
     if model_pct >= 60 and tb_under_pct >= 55:
         return (
@@ -290,3 +275,24 @@ def edge_badge(under_score: float, tb_under_pct: float) -> str:
             'border-radius:20px;font-size:.65rem;font-weight:700;'
             'font-family:\'JetBrains Mono\',monospace">↔️ NEUTRAL</span>'
         )
+
+
+def edge_label(under_score: float, tb_under_pct: float) -> str:
+    """
+    Plain-text version of the edge signal — safe for st.dataframe() columns.
+    Returns a short emoji + label string that renders cleanly in a table cell.
+    """
+    if tb_under_pct <= 0 or pd.isna(tb_under_pct):
+        return "—"
+
+    model_pct = under_score
+    diff      = model_pct - tb_under_pct
+
+    if model_pct >= 60 and tb_under_pct >= 55:
+        return "✅ Confirmed"
+    elif diff >= 18:
+        return "⚡ Edge"
+    elif diff <= -18:
+        return "🔄 Contrarian"
+    else:
+        return "↔️ Neutral"

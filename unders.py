@@ -473,10 +473,10 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
                 disp['prop_tb_under_odds'].astype(bool).any()
     if has_props:
         try:
-            from prop_odds import edge_badge
+            from prop_odds import edge_label
             under_score_col = sc
             disp['Market Edge'] = disp.apply(
-                lambda r: edge_badge(
+                lambda r: edge_label(
                     float(r.get(under_score_col, 0) or 0),
                     float(r.get('prop_tb_under_pct', 0) or 0)
                 ), axis=1

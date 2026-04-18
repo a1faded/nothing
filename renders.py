@@ -65,19 +65,11 @@ def _eligible_for_target(df: pd.DataFrame, sc: str) -> pd.DataFrame:
     Hard profile filter — removes players whose score is higher in a
     more powerful category than the target category.
 
-    Rule: if a player fits a stronger profile better, they should never
-    be the #1 recommendation for a weaker profile prop.
+    Single:  exclude if XB_Score > Single_Score or HR_Score > Single_Score
+    XB:      exclude if HR_Score > XB_Score
+    Hit/HR:  no exclusions
 
-    Single:  exclude if XB_Score > Single_Score  (XB profile, will go for extra bases)
-             exclude if HR_Score > Single_Score  (power profile, even further mismatch)
-    XB:      exclude if HR_Score > XB_Score      (HR profile, may clear the fence)
-    Hit:     no exclusions — any contact type contributes
-    HR:      no exclusions — HR profile is the target
-
-    Scores remain unchanged in the results table so users can still see
-    the full picture. This only affects who qualifies as #1 for each target.
-
-    Falls back to the full df if filtering leaves it empty (e.g. very small slate).
+    Falls back to the full df if filtering leaves it empty.
     """
     sc_base = sc.replace('_gc', '')
 
@@ -98,17 +90,16 @@ def _eligible_for_target(df: pd.DataFrame, sc: str) -> pd.DataFrame:
         return filtered if not filtered.empty else df
 
     return df
+
+
+def _profile_badge(row: pd.Series, target_sc: str) -> str:
     """
     Returns an HTML warning badge when the player's contact profile is a
     mismatch for the target bet type.
 
-    Single target: warn when XB_Score or HR_Score significantly exceeds Single_Score
-    XB target:     warn when HR_Score significantly exceeds XB_Score (may go yard)
-    Hit target:    no warning — any base hit includes all contact types
-
-    These thresholds deliberately use the PRE-penalty scores from the df to
-    show the raw profile gap to the user, not the already-penalised Single_Score.
-    The penalty in engine.py adjusts the ranking; this badge explains WHY.
+    Single: warn when XB_Score or HR_Score significantly exceeds Single_Score
+    XB:     warn when HR_Score significantly exceeds XB_Score
+    Hit/HR: no warning
     """
     if target_sc not in ('Single_Score', 'XB_Score'):
         return ""
@@ -123,6 +114,37 @@ def _eligible_for_target(df: pd.DataFrame, sc: str) -> pd.DataFrame:
     badge = ""
 
     if target_sc == 'Single_Score':
+        xb_gap = xb - single
+        hr_gap = hr - single
+        if xb_gap >= 12:
+            badge = (
+                '<span style="background:#1c1400;color:#f59e0b;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">⚡ XB PROFILE</span>'
+            )
+        elif xb_gap >= 7:
+            badge = (
+                '<span style="background:#1c1000;color:#fb923c;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">⚡ XB LEAN</span>'
+            )
+        elif hr_gap >= 15:
+            badge = (
+                '<span style="background:#1c0000;color:#f87171;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">💣 POWER PROFILE</span>'
+            )
+
+    elif target_sc == 'XB_Score':
+        hr_gap = hr - xb
+        if hr_gap >= 12:
+            badge = (
+                '<span style="background:#1c0000;color:#f87171;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">💣 HR PROFILE</span>'
+            )
+
+    return badge
         xb_gap = xb - single
         hr_gap = hr - single
         if xb_gap >= 12:

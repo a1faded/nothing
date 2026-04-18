@@ -44,29 +44,26 @@ from helpers import grade_pill, style_grade_cell
 # UNDER SCORE COMPUTATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
+def compute_under_scores(df: pd.DataFrame,
+                         form_map: dict | None = None) -> pd.DataFrame:
     """
     Adds four Under_Score columns to the slate df. Vectorized.
 
-    Under types and what kills each bet:
-      XB Under:    Double or triple. Singles and HRs are separate props.
-      TB 1.5 Under: 2+ total bases. A SINGLE CASHES — only XB/HR kill it.
-      TB 0.5 Under: Any base hit (0 bases needed). Most restrictive.
-      Hit Under:   Any base hit. Functionally same as TB 0.5 — different book label.
+    Signal layers (in order of weight):
+      1. Inverted offensive scores (Hit/XB/HR_Score) — primary signal
+      2. K% bonus — strikeouts = 0 bases
+      3. BB% bonus — walks = 0 bases (especially important for TB/Hit unders)
+      4. Pitcher grade bonus — elite pitchers suppress all contact
+      5. Historical matchup AVG/PA — vs this pitcher type (from BallPark Pal)
+      6. Recent XB rate (7-day) — player on XB tear? Penalise XB/TB unders.
+      7. xSLG (Statcast expected slugging) — power/XB tendency from full season
 
-    Key insight on TB 1.5 (the most common line):
-      A player who goes 1-for-3 with a single CASHES the under.
-      Therefore Hit_Score being high is NEUTRAL for this bet — singles are fine.
-      Only XB_Score and HR_Score represent true danger (2+ bases per hit).
-      Single_Score being higher than XB_Score signals a true singles profile
-      which is POSITIVE for TB 1.5 — they make contact but it stays in the park.
-
-    Disqualification:
-      Each type has offsetting categories that can still accumulate bases.
-      Players exceeding the threshold in an offsetting category are flagged ⚠️.
+    form_map: {batter_name: {xb_rate, hit_rate, ...}} from get_recent_batting_form()
+              Optional — scoring degrades gracefully to 0 if not provided.
     """
-    df  = df.copy()
-    cfg = CONFIG
+    df       = df.copy()
+    cfg      = CONFIG
+    form_map = form_map or {}
 
     for col in ['Hit_Score','Single_Score','XB_Score','HR_Score']:
         if col not in df.columns:
@@ -77,22 +74,18 @@ def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
     xb     = df['XB_Score'].clip(0, 100)
     hr     = df['HR_Score'].clip(0, 100)
     k      = pd.to_numeric(df.get('p_k', 0), errors='coerce').fillna(0)
+    bb     = pd.to_numeric(df.get('p_bb',0), errors='coerce').fillna(0)
 
-    # K% bonus: above-league K% = more strikeouts = better under candidate
+    # ── Signal 1: K% bonus ────────────────────────────────────────────────────
     k_bonus = ((k - cfg['league_k_avg']) * cfg['under_k_weight']).clip(lower=0)
 
-    # BB% bonus: walks produce ZERO bases in every under prop type.
-    # Walk = not a hit, not a total base, not an XB. It's the safest possible
-    # outcome for an under. Weight is higher than K% for TB/Hit unders because
-    # a walk definitively produces 0 bases whereas a K still means an out
-    # (strikeout = no hit, but batter still had a chance to make contact first).
-    bb = pd.to_numeric(df.get('p_bb', 0), errors='coerce').fillna(0)
+    # ── Signal 2: BB% bonus ───────────────────────────────────────────────────
     bb_xb   = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_xb',   0.5)).clip(lower=0)
     bb_tb15 = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_tb15', 0.8)).clip(lower=0)
     bb_tb05 = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_tb05', 1.0)).clip(lower=0)
     bb_hit  = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_hit',  1.2)).clip(lower=0)
 
-    # Pitcher grade bonus
+    # ── Signal 3: Pitcher grade bonus ─────────────────────────────────────────
     def _pgbonus(grade):
         return (cfg['under_pitcher_bonus'] if grade == 'A+' else
                 cfg['under_pitcher_a']     if grade == 'A'  else 0.0)
@@ -100,21 +93,81 @@ def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
               if 'pitch_grade' in df.columns \
               else pd.Series(0.0, index=df.index)
 
+    # ── Signal 4: Historical matchup AVG vs pitcher type ──────────────────────
+    # Source: BallPark Pal PA/H/AVG columns — already in df.
+    # Below-league-AVG history = bonus (struggles here historically).
+    # Above-league-AVG history = penalty (hits well here).
+    # Minimum PA threshold prevents small-sample noise from dominating.
+    # Weight varies by under type — AVG most directly relevant to Hit Under.
+    hist_min_pa = cfg.get('under_hist_min_pa', 5)
+    hist_weight = cfg.get('under_hist_weight', 18.0)
+    hist_max    = cfg.get('under_hist_max_adj', 5.0)
+    league_avg  = cfg['league_avg']   # 0.2445
+
+    pa_col  = pd.to_numeric(df.get('PA',  0), errors='coerce').fillna(0)
+    avg_col = pd.to_numeric(df.get('AVG', 0), errors='coerce').fillna(0)
+
+    # Only fire when PA >= threshold; zero otherwise (neutral — no penalty, no bonus)
+    hist_raw  = (league_avg - avg_col) * hist_weight   # positive = below avg = good
+    hist_base = hist_raw.where(pa_col >= hist_min_pa, 0.0).clip(-hist_max, hist_max)
+
+    # Per-type scaling — AVG matters most for Hit Under, moderately for TB/XB
+    hist_xb   = hist_base * 0.6
+    hist_tb15 = hist_base * 0.8
+    hist_tb05 = hist_base * 1.0
+    hist_hit  = hist_base * 1.2
+
+    # ── Signal 5: Recent XB rate (7-day batch) ────────────────────────────────
+    # Source: form_map['xb_rate'] = (2B+3B)/G from batting_stats_range().
+    # High recent XB rate = player on an extra-base tear = bad for XB/TB unders.
+    # Low recent XB rate = player hasn't been going for extra bases = good.
+    # Only applied to XB and TB 1.5 unders (not Hit/TB05 where singles matter too).
+    xb_rate_lg  = cfg.get('under_xb_rate_lg_avg',  0.25)
+    xb_rate_w   = cfg.get('under_xb_rate_weight',   8.0)
+    xb_rate_max = cfg.get('under_xb_rate_max_adj',  4.0)
+
+    def _xb_rate_signal(batter: str) -> float:
+        info = form_map.get(batter, {})
+        if not info or info.get('games', 0) < 3:
+            return 0.0
+        rate = info.get('xb_rate', xb_rate_lg)
+        # Below league avg = bonus (staying in park); above = penalty (hitting XBs)
+        return float(np.clip((xb_rate_lg - rate) * xb_rate_w, -xb_rate_max, xb_rate_max))
+
+    xb_rate_adj = df['Batter'].apply(_xb_rate_signal)
+
+    # ── Signal 6: xSLG from Statcast ──────────────────────────────────────────
+    # Expected slugging measures power/XB tendency using launch angle + exit velocity.
+    # High xSLG = player is a true extra-base threat even if recent stats don't show it.
+    # Applied only to XB Under — moderate weight, confirmation layer.
+    xslg_lg = cfg['league_xslg']    # 0.400
+    xslg_adj = pd.Series(0.0, index=df.index)
+    if 'xSLG' in df.columns:
+        xslg_vals = pd.to_numeric(df['xSLG'], errors='coerce').fillna(xslg_lg)
+        # Below league xSLG = bonus (less power); above = penalty (power threat)
+        xslg_adj = ((xslg_lg - xslg_vals) * 12.0).clip(-4.0, 4.0)
+
+    # ── Compute final scores ──────────────────────────────────────────────────
     # ── XB Under ─────────────────────────────────────────────────────────────
     df['Under_XB_Score'] = (
-        (100 - xb)  * 0.55
-      + (100 - hr)  * 0.30
-      + (100 - hit) * 0.15
+        (100 - xb)  * 0.50
+      + (100 - hr)  * 0.28
+      + (100 - hit) * 0.12
       + k_bonus + bb_xb + p_bonus
+      + hist_xb              # matchup history
+      + xb_rate_adj          # recent XB tendency
+      + xslg_adj             # Statcast power profile
     ).clip(0, 100).round(1)
 
     # ── TB Under 1.5 ─────────────────────────────────────────────────────────
     single_profile_bonus = ((single - xb) * 0.15).clip(lower=0, upper=5)
     df['Under_TB15_Score'] = (
-        (100 - xb)  * 0.55
-      + (100 - hr)  * 0.35
+        (100 - xb)  * 0.50
+      + (100 - hr)  * 0.32
       + single_profile_bonus
       + k_bonus + bb_tb15 + p_bonus
+      + hist_tb15            # matchup history
+      + xb_rate_adj * 0.7   # recent XB matters but less for 1.5 line
     ).clip(0, 100).round(1)
 
     # ── TB Under 0.5 ─────────────────────────────────────────────────────────
@@ -124,6 +177,7 @@ def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
       + (100 - hr)  * 0.25
       + k_bonus * 1.2
       + bb_tb05 + p_bonus
+      + hist_tb05            # matchup history most relevant here
     ).clip(0, 100).round(1)
 
     # ── Hit Under ─────────────────────────────────────────────────────────────
@@ -131,23 +185,17 @@ def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
         (100 - hit) * 0.70
       + k_bonus * 1.5
       + bb_hit + p_bonus
+      + hist_hit             # AVG directly measures hit probability
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────
-    # XB Under: HR or high Hit volume = danger (can still get bases via other routes)
     df['_disq_xb']   = (hr  > cfg['under_xb_disq_hr']) | \
                        (hit > cfg['under_xb_disq_hit'])
-
-    # TB 1.5 Under: only XB and HR disqualify (singles are fine for this line)
-    df['_disq_tb15'] = (xb > cfg['under_xb_disq_hr']) | \
-                       (hr > cfg['under_xb_disq_hr'])
-
-    # TB 0.5 Under: any elevated offensive score = danger
+    df['_disq_tb15'] = (xb  > cfg['under_xb_disq_hr']) | \
+                       (hr  > cfg['under_xb_disq_hr'])
     df['_disq_tb05'] = (hit > cfg['under_tb_disq_any']) | \
                        (xb  > cfg['under_tb_disq_any']) | \
                        (hr  > cfg['under_tb_disq_any'])
-
-    # Hit Under: only Hit_Score disqualifies
     df['_disq_hit']  = hit > cfg['under_hit_disq_hit']
 
     return df
@@ -464,7 +512,8 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
                  'prop_hr_odds',
                  'Hit_Score','XB_Score','HR_Score',
                  'p_k','p_bb','total_hit_prob','p_1b','p_xb','p_hr',
-                 'vs Grade']
+                 'vs Grade',
+                 'PA','H','AVG']    # historical matchup data — always last
 
     rename   = {
         sc:            label_map.get(sc, 'Under Score'),
@@ -484,6 +533,9 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         'prop_tb_under_odds': 'TB Under',
         'prop_tb_over_odds':  'TB Over',
         'prop_hr_odds':       'HR Odds',
+        'PA':          'Hist PA',
+        'H':           'Hist H',
+        'AVG':         'Hist AVG',
     }
 
     # Add market edge badge column when prop data available
@@ -540,6 +592,10 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
             fmt[cn] = "{:.1f}"
         elif cn == 'vsPit':
             fmt[cn] = "{:.0f}"
+        elif cn == 'Hist AVG':
+            fmt[cn] = "{:.3f}"
+        elif cn == 'Hist PA':
+            fmt[cn] = "{:.0f}"
 
     styled = out_df.style.format(fmt, na_rep="—")
 
@@ -575,6 +631,15 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
     if 'P.Grd' in out_df.columns:
         styled = styled.map(style_grade_cell, subset=['P.Grd'])
 
+    # Hist AVG: reversed gradient — lower AVG = better under candidate (greener)
+    if 'Hist AVG' in out_df.columns:
+        try:
+            styled = styled.background_gradient(
+                subset=['Hist AVG'], cmap='RdYlGn_r', vmin=0.100, vmax=0.400
+            )
+        except Exception:
+            pass
+
     # ── Column config ─────────────────────────────────────────────────────────
     col_cfg: dict = {}
     try:
@@ -602,6 +667,23 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         if 'TB Line' in out_df.columns:
             col_cfg['TB Line'] = CC.TextColumn("TB Line", width="small",
                                                help="Sportsbook line: 0.5 or 1.5 total bases")
+        if 'Hist PA' in out_df.columns:
+            col_cfg['Hist PA'] = CC.NumberColumn(
+                "Hist PA", format="%d", min_value=0,
+                help="Plate appearances vs this pitcher type (BallPark Pal). "
+                     "≥5 PA = signal is meaningful. <5 = small sample."
+            )
+        if 'Hist H' in out_df.columns:
+            col_cfg['Hist H'] = CC.NumberColumn(
+                "Hist H", format="%d", min_value=0,
+                help="Hits in those plate appearances vs this pitcher type."
+            )
+        if 'Hist AVG' in out_df.columns:
+            col_cfg['Hist AVG'] = CC.NumberColumn(
+                "Hist AVG", format="%.3f",
+                help="Batting average vs this pitcher type. "
+                     "Below .245 (league avg) = historically struggles here = under signal."
+            )
     except Exception:
         col_cfg = {}
 
@@ -658,8 +740,13 @@ def under_page(df: pd.DataFrame, filters_base: dict):
         st.error("❌ No slate data loaded.")
         return
 
-    # Compute under scores
-    df = compute_under_scores(df)
+    # Compute under scores — pass form_map for XB rate signal
+    try:
+        from mlb_api import get_recent_batting_form as _get_form
+        _form = _get_form(days=7)
+    except Exception:
+        _form = {}
+    df = compute_under_scores(df, form_map=_form)
 
     # Build under-specific sidebar filters
     filters = build_under_filters(df)

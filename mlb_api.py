@@ -246,13 +246,17 @@ def _lookup_pitcher_hand(full_name: str) -> str | None:
 @st.cache_data(ttl=3600)
 def get_recent_batting_form(days: int = 7) -> dict:
     """
-    {batter_name: {hit_rate, hits, games}} for the last N days.
+    {batter_name: {hit_rate, hits, games, xb_rate, doubles, triples}} for last N days.
 
     Uses pybaseball.batting_stats_range() — one batch call covers all batters.
-    hit_rate = H/G. League average ~0.9 hits/game.
-    Hot: >1.2  Cold: <0.5  (thresholds in engine.py)
+    hit_rate = H/G. xb_rate = (2B+3B)/G.
 
-    Missing players → engine applies 0 pts (neutral).
+    xb_rate is used by compute_under_scores() to penalise XB/TB unders for
+    players on a recent extra-base tear, and reward players who are hitting
+    singles or going hitless.
+
+    League avg xb_rate ~0.25 XB/G (roughly 1 XB every 4 games).
+    Hot XB: >0.4/G  |  Cold XB: <0.1/G
     """
     try:
         from pybaseball import batting_stats_range
@@ -267,10 +271,19 @@ def get_recent_batting_form(days: int = 7) -> dict:
         result = {}
         for _, row in df.iterrows():
             name = str(row.get('Name','')).strip()
-            g    = int(row.get('G',0) or 0)
-            h    = int(row.get('H',0) or 0)
+            g    = int(row.get('G',  0) or 0)
+            h    = int(row.get('H',  0) or 0)
+            d    = int(row.get('2B', 0) or 0)
+            t    = int(row.get('3B', 0) or 0)
             if name and g > 0:
-                result[name] = {'hit_rate': round(h/g,3), 'hits': h, 'games': g}
+                result[name] = {
+                    'hit_rate': round(h / g, 3),
+                    'hits':     h,
+                    'games':    g,
+                    'xb_rate':  round((d + t) / g, 3),
+                    'doubles':  d,
+                    'triples':  t,
+                }
         return result
     except Exception:
         return {}

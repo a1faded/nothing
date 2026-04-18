@@ -84,6 +84,21 @@ CONFIG = {
     'under_bb_weight_tb05': 1.0,   # TB 0.5: walks are ideal — guaranteed 0 bases
     'under_bb_weight_hit':  1.2,   # Hit Under: walk = no hit, best possible outcome
 
+    # Historical matchup signal (PA/AVG vs this pitcher type from BallPark Pal CSVs)
+    # AVG below league average = bonus (historically struggles here)
+    # AVG above league average = penalty (historically hits well here)
+    # Min PA threshold prevents small-sample noise from dominating
+    'under_hist_weight':    18.0,  # pts per unit of AVG deviation from league avg
+    'under_hist_min_pa':     5,    # minimum PA to apply hist signal (below = neutral)
+    'under_hist_max_adj':    5.0,  # max pts the hist signal can add or subtract
+
+    # Recent XB rate signal from 7-day pybaseball batch (2B+3B)/G
+    # High recent XB rate = player is on an extra-base tear = bad for XB/TB unders
+    # Applied only to XB Under and TB 1.5 Under
+    'under_xb_rate_lg_avg':  0.25, # league avg XB/G (~1 XB per 4 games)
+    'under_xb_rate_weight':  8.0,  # pts per unit deviation from league avg
+    'under_xb_rate_max_adj': 4.0,  # cap ±4 pts — meaningful but not dominant
+
     # ── Hot park extra boost (gc_hr4 > 2× median = 24.4%) ────────────────────
     # Applied as flat +pts to HR_Score_gc for ALL batters in that game.
     # Rewards entire lineups in genuinely HR-friendly park/game environments.

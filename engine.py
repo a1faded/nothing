@@ -377,6 +377,47 @@ def compute_scores(df: pd.DataFrame,
         for col in cols_:
             df[col] = (df[col] + platoon_adj).clip(0,100).round(1)
 
+    # ── Stage 4: Cross-score profile correction ───────────────────────────────
+    # Problem: a player can rank #1 for Singles even though their XB or HR score
+    # is significantly higher, meaning their contact profile produces extra bases
+    # more than singles. Betting them for a single when they're more likely to
+    # double is a profile mismatch that loses the prop.
+    #
+    # Fix: penalise Single_Score when XB_Score or HR_Score exceeds it materially.
+    #
+    # XB gap penalty:
+    #   If XB_Score > Single_Score + XB_GAP_THRESHOLD (8 pts):
+    #   penalty = (gap - threshold) × XB_RATE (0.40), capped at XB_MAX (8 pts)
+    #   Rationale: 8 pts gap means meaningfully different contact profiles.
+    #   0.40 rate means each extra pt of gap costs 0.4 pts in Single_Score.
+    #   Example: Clement XB=85.7, Single=71.0 → gap=14.7 → excess=6.7 → -2.7 pts
+    #
+    # HR gap penalty (lighter — power hitters sometimes still hit singles):
+    #   If HR_Score > Single_Score + HR_GAP_THRESHOLD (12 pts):
+    #   penalty = (gap - threshold) × HR_RATE (0.25), capped at HR_MAX (5 pts)
+    #
+    # Applied to base scores identically so Park Δ is unaffected.
+    # Hit_Score is NOT penalised — "any hit" includes XB so high XB is fine.
+
+    XB_GAP_THRESHOLD = 8.0
+    XB_RATE          = 0.40
+    XB_MAX           = 8.0
+    HR_GAP_THRESHOLD = 12.0
+    HR_RATE          = 0.25
+    HR_MAX           = 5.0
+
+    if 'XB_Score' in df.columns and 'Single_Score' in df.columns:
+        xb_gap  = (df['XB_Score'] - df['Single_Score'] - XB_GAP_THRESHOLD).clip(lower=0)
+        xb_pen  = (xb_gap * XB_RATE).clip(upper=XB_MAX)
+        df['Single_Score']      = (df['Single_Score']      - xb_pen).clip(0, 100).round(1)
+        df['Single_Score_base'] = (df['Single_Score_base'] - xb_pen).clip(0, 100).round(1)
+
+    if 'HR_Score' in df.columns and 'Single_Score' in df.columns:
+        hr_gap  = (df['HR_Score'] - df['Single_Score'] - HR_GAP_THRESHOLD).clip(lower=0)
+        hr_pen  = (hr_gap * HR_RATE).clip(upper=HR_MAX)
+        df['Single_Score']      = (df['Single_Score']      - hr_pen).clip(0, 100).round(1)
+        df['Single_Score_base'] = (df['Single_Score_base'] - hr_pen).clip(0, 100).round(1)
+
     return df
 
 

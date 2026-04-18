@@ -60,6 +60,65 @@ def _score_tier(score: float) -> tuple[str, str]:
     return             "WEAK",     "#f87171"
 
 
+def _profile_badge(row: pd.Series, target_sc: str) -> str:
+    """
+    Returns an HTML warning badge when the player's contact profile is a
+    mismatch for the target bet type.
+
+    Single target: warn when XB_Score or HR_Score significantly exceeds Single_Score
+    XB target:     warn when HR_Score significantly exceeds XB_Score (may go yard)
+    Hit target:    no warning — any base hit includes all contact types
+
+    These thresholds deliberately use the PRE-penalty scores from the df to
+    show the raw profile gap to the user, not the already-penalised Single_Score.
+    The penalty in engine.py adjusts the ranking; this badge explains WHY.
+    """
+    if target_sc not in ('Single_Score', 'XB_Score'):
+        return ""
+
+    try:
+        single = float(row.get('Single_Score', 0) or 0)
+        xb     = float(row.get('XB_Score',     0) or 0)
+        hr     = float(row.get('HR_Score',      0) or 0)
+    except (ValueError, TypeError):
+        return ""
+
+    badge = ""
+
+    if target_sc == 'Single_Score':
+        xb_gap = xb - single
+        hr_gap = hr - single
+        if xb_gap >= 12:
+            badge = (
+                '<span style="background:#1c1400;color:#f59e0b;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">⚡ XB PROFILE</span>'
+            )
+        elif xb_gap >= 7:
+            badge = (
+                '<span style="background:#1c1000;color:#fb923c;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">⚡ XB LEAN</span>'
+            )
+        elif hr_gap >= 15:
+            badge = (
+                '<span style="background:#1c0000;color:#f87171;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">💣 POWER PROFILE</span>'
+            )
+
+    elif target_sc == 'XB_Score':
+        hr_gap = hr - xb
+        if hr_gap >= 12:
+            badge = (
+                '<span style="background:#1c0000;color:#f87171;padding:1px 7px;'
+                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
+                'font-family:\'JetBrains Mono\',monospace">💣 HR PROFILE</span>'
+            )
+
+    return badge
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,11 +242,12 @@ def render_score_summary_cards(slate_df: pd.DataFrame, filters: dict):
             park_str = f" · <span style='color:{'var(--pos)' if delta>=0 else 'var(--neg)'}'>{'+' if delta>=0 else ''}{pct:.0f}% park</span>"
 
         tier_lbl, tier_color = _score_tier(disp_val)
+        profile_badge = _profile_badge(row, sc)
 
         cards_html += f"""
         <div class="scard {css}">
           <div class="sc-type"><span>{icon} {short}</span>{gc_str} — {desc}</div>
-          <div class="sc-name">{row['Batter']}</div>
+          <div class="sc-name">{row['Batter']}{profile_badge}</div>
           <div class="sc-meta">{row['Team']} vs {row['Pitcher']}{park_str}</div>
           <div class="sc-score">{disp_val:.1f}</div>
           <div style="margin-top:.35rem">
@@ -636,6 +696,7 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
             base_col = sc + '_base'
 
             tier_lbl, tier_color = _score_tier(disp_val)
+            profile_badge = _profile_badge(row, sc)
 
             park_row = ""
             if filters['use_park'] and base_col in slate_df.columns \
@@ -702,11 +763,40 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
                     f'{flabel}{frate_str}</span></div>'
                 )
 
+            # Profile gap explanation row — shows the gap that triggered the badge
+            profile_row = ""
+            if sc == 'Single_Score':
+                xb_val  = float(row.get('XB_Score', 0) or 0)
+                hr_val  = float(row.get('HR_Score',  0) or 0)
+                xb_gap  = xb_val - disp_val
+                hr_gap  = hr_val - disp_val
+                if xb_gap >= 7:
+                    profile_row = (
+                        f'<div class="pcard-row"><span class="pk">XB vs Single gap</span>'
+                        f'<span class="pv" style="color:#f59e0b">'
+                        f'XB={xb_val:.1f} (+{xb_gap:.1f})</span></div>'
+                    )
+                elif hr_gap >= 12:
+                    profile_row = (
+                        f'<div class="pcard-row"><span class="pk">HR vs Single gap</span>'
+                        f'<span class="pv" style="color:#ef4444">'
+                        f'HR={hr_val:.1f} (+{hr_gap:.1f})</span></div>'
+                    )
+            elif sc == 'XB_Score':
+                hr_val = float(row.get('HR_Score', 0) or 0)
+                hr_gap = hr_val - disp_val
+                if hr_gap >= 12:
+                    profile_row = (
+                        f'<div class="pcard-row"><span class="pk">HR vs XB gap</span>'
+                        f'<span class="pv" style="color:#ef4444">'
+                        f'HR={hr_val:.1f} (+{hr_gap:.1f})</span></div>'
+                    )
+
             cards_html += f"""
             <div class="pcard {css}">
               <div class="pcard-header">
                 <div>
-                  <div class="pcard-name">{row['Batter']}</div>
+                  <div class="pcard-name">{row['Batter']}{profile_badge}</div>
                   <div class="pcard-team">{row['Team']} · {icon} {desc}</div>
                 </div>
                 <div style="text-align:right">
@@ -723,14 +813,14 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
               <div class="pcard-row"><span class="pk">1B / XB / HR</span>
                 <span class="pv">{row['p_1b']:.1f} / {row['p_xb']:.1f} / {row['p_hr']:.1f}%</span></div>
               <div class="pcard-row"><span class="pk">K%</span>
-                <span class="pv">{row['p_k']:.1f}% <span class="{k_cls}">({k_lg:+.1f})</span></span></div>
+                <span class="pv {k_cls}">{row['p_k']:.1f}% ({k_lg:+.1f} vs lg)</span></div>
               <div class="pcard-row"><span class="pk">BB%</span>
-                <span class="pv">{row['p_bb']:.1f}% <span class="{bb_cls}">({bb_lg:+.1f})</span></span></div>
+                <span class="pv {bb_cls}">{row['p_bb']:.1f}% ({bb_lg:+.1f} vs lg)</span></div>
               <div class="pcard-row"><span class="pk">HR vs Lg</span>
                 <span class="pv {hr_cls}">{hr_lg:+.2f}%</span></div>
               <div class="pcard-row"><span class="pk">vs Grade</span>
                 <span class="pv">{int(row['vs Grade'])}</span></div>
-              {order_row}{form_row}{sc_row}{park_row}{hist_row}
+              {profile_row}{order_row}{form_row}{sc_row}{park_row}{hist_row}
             </div>"""
 
         cards_html += '</div>'

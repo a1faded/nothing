@@ -116,6 +116,35 @@ html, body, [class*="css"] {
   letter-spacing: .08em;
 }
 
+/* ── SIDEBAR COLLAPSE TOGGLE — make reopen button always visible ─────────── */
+/* The collapse/expand arrow button that Streamlit renders at the sidebar edge */
+[data-testid="collapsedControl"] {
+  display:          flex !important;
+  align-items:      center !important;
+  justify-content:  center !important;
+  width:            2.2rem !important;
+  height:           2.2rem !important;
+  background:       var(--surf2) !important;
+  border:           1px solid var(--border2) !important;
+  border-radius:    0 8px 8px 0 !important;
+  color:            var(--hit) !important;
+  cursor:           pointer !important;
+  top:              50% !important;
+  transform:        translateY(-50%) !important;
+  box-shadow:       2px 0 12px rgba(0,0,0,.4) !important;
+  transition:       background .2s, box-shadow .2s !important;
+}
+[data-testid="collapsedControl"]:hover {
+  background:   var(--surf3) !important;
+  box-shadow:   2px 0 20px rgba(16,185,129,.25) !important;
+}
+[data-testid="collapsedControl"] svg {
+  width:  1.1rem !important;
+  height: 1.1rem !important;
+  color:  var(--hit) !important;
+  fill:   var(--hit) !important;
+}
+
 /* Sidebar radio — style like a nav menu */
 [data-testid="stSidebar"] [data-testid="stRadio"] label {
   display: flex !important;

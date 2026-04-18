@@ -488,6 +488,10 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     cols = {'Batter':'Batter','Team':'Team','Pitcher':'Pitcher',
             'pitch_grade':'P.Grd', sc: active_label}
 
+    # Profile mismatch column — immediately after score for visibility
+    if 'Profile' in disp.columns:
+        cols['Profile'] = 'Profile'
+
     # Inject Pos immediately after Batter/Team when available
     if has_order and 'Pos' in disp.columns:
         cols['Pos'] = 'Pos'
@@ -511,6 +515,29 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     if has_form and 'Form' in disp.columns:
         cols['Form'] = 'Form'
 
+    # ── Profile mismatch column ────────────────────────────────────────────────
+    # Plain-text label that renders cleanly in st.dataframe()
+    # Shows for Single and XB targets — blank for Hit and HR
+    sc_base_for_profile = filters.get('score_col_base',
+                                      filters['score_col'].replace('_gc',''))
+    if sc_base_for_profile in ('Single_Score', 'XB_Score'):
+        def _profile_label(row):
+            try:
+                xb  = float(row.get('XB_Score',  0) or 0)
+                hr  = float(row.get('HR_Score',   0) or 0)
+                si  = float(row.get('Single_Score',0) or 0)
+                if sc_base_for_profile == 'Single_Score':
+                    if xb - si >= 12:  return "⚡ XB Profile"
+                    if xb - si >=  7:  return "⚡ XB Lean"
+                    if hr - si >= 15:  return "💣 Power"
+                    return "✅ Clean"
+                else:  # XB_Score
+                    if hr - xb >= 12:  return "💣 HR Profile"
+                    return "✅ Clean"
+            except Exception:
+                return ""
+        disp['Profile'] = disp.apply(_profile_label, axis=1)
+
     # ── Prop odds columns ──────────────────────────────────────────────────────
     # TB line + under odds on every target (quick reference for any under prop)
     # HR odds only when the active target is HR (over side context)
@@ -532,6 +559,24 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
 
     existing = [c for c in cols if c in disp.columns]
     out_df   = disp[existing].rename(columns=cols)
+
+    # ── Add Tier column (ELITE/STRONG/GOOD/MODERATE/WEAK) ─────────────────────
+    # Placed immediately after the score column so users get a text label
+    # alongside the number — no mental calibration needed.
+    tier_map = lambda s: (
+        "🟢 ELITE"    if s >= 75 else
+        "🟡 STRONG"   if s >= 60 else
+        "🟠 GOOD"     if s >= 45 else
+        "🔴 MODERATE" if s >= 30 else
+        "⚫ WEAK"
+    )
+    if active_label in out_df.columns:
+        tier_vals = out_df[active_label].apply(
+            lambda x: tier_map(float(x)) if pd.notna(x) else "—"
+        )
+        # Insert Tier right after active score column
+        insert_at = out_df.columns.get_loc(active_label) + 1
+        out_df.insert(insert_at, 'Tier', tier_vals)
 
     fmt = {}
     for cn in out_df.columns:
@@ -577,7 +622,54 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     if 'P.Grd' in out_df.columns:
         styled = styled.map(style_grade_cell, subset=['P.Grd'])
 
-    st.dataframe(styled, width='stretch')
+    # ── Column config — widths, tooltips, number formatting ───────────────────
+    col_cfg: dict = {}
+    try:
+        import streamlit as _st
+        CC = _st.column_config
+
+        col_cfg['Batter'] = CC.TextColumn("Batter", width="medium")
+        col_cfg['Team']   = CC.TextColumn("Team",   width="small")
+        col_cfg['Tier']   = CC.TextColumn(
+            "Tier", width="small",
+            help="ELITE ≥75 · STRONG ≥60 · GOOD ≥45 · MODERATE ≥30 · WEAK <30"
+        )
+        if 'Profile' in out_df.columns:
+            col_cfg['Profile'] = CC.TextColumn(
+                "Profile", width="small",
+                help="Contact profile fit for this prop. ✅ Clean = ideal. "
+                     "⚡ XB/💣 Power = player's contact tends toward extra bases."
+            )
+        for score_lbl in ['🎯 Hit','1️⃣ Single','🔥 XB','💣 HR',
+                           '🎯 Hit ⛅','1️⃣ Single ⛅','🔥 XB ⛅','💣 HR ⛅']:
+            if score_lbl in out_df.columns:
+                col_cfg[score_lbl] = CC.NumberColumn(
+                    score_lbl, format="%.1f",
+                    min_value=0, max_value=100,
+                    help="Score 0–100. Higher = stronger candidate for this prop."
+                )
+        for odds_col in ['TB Under','TB Over','HR Odds']:
+            if odds_col in out_df.columns:
+                col_cfg[odds_col] = CC.TextColumn(
+                    odds_col, width="small",
+                    help="American odds from Tank01 market data. e.g. -190 means you bet $190 to win $100."
+                )
+        if 'TB Line' in out_df.columns:
+            col_cfg['TB Line'] = CC.TextColumn(
+                "TB Line", width="small",
+                help="Total Bases line set by the sportsbook (0.5 or 1.5)."
+            )
+        if 'Market Edge' in out_df.columns:
+            col_cfg['Market Edge'] = CC.TextColumn(
+                "Market Edge", width="small",
+                help="⚡ EDGE = model favours under more than market. "
+                     "✅ CONFIRMED = both agree. 🔄 CONTRARIAN = market more bullish on under than model."
+            )
+    except Exception:
+        col_cfg = {}
+
+    st.dataframe(styled, use_container_width=True, column_config=col_cfg or None,
+                 hide_index=False)
 
     LG        = CONFIG
     park_note = (

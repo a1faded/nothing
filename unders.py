@@ -81,6 +81,17 @@ def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
     # K% bonus: above-league K% = more strikeouts = better under candidate
     k_bonus = ((k - cfg['league_k_avg']) * cfg['under_k_weight']).clip(lower=0)
 
+    # BB% bonus: walks produce ZERO bases in every under prop type.
+    # Walk = not a hit, not a total base, not an XB. It's the safest possible
+    # outcome for an under. Weight is higher than K% for TB/Hit unders because
+    # a walk definitively produces 0 bases whereas a K still means an out
+    # (strikeout = no hit, but batter still had a chance to make contact first).
+    bb = pd.to_numeric(df.get('p_bb', 0), errors='coerce').fillna(0)
+    bb_xb   = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_xb',   0.5)).clip(lower=0)
+    bb_tb15 = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_tb15', 0.8)).clip(lower=0)
+    bb_tb05 = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_tb05', 1.0)).clip(lower=0)
+    bb_hit  = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_hit',  1.2)).clip(lower=0)
+
     # Pitcher grade bonus
     def _pgbonus(grade):
         return (cfg['under_pitcher_bonus'] if grade == 'A+' else
@@ -90,47 +101,36 @@ def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
               else pd.Series(0.0, index=df.index)
 
     # ── XB Under ─────────────────────────────────────────────────────────────
-    # Doubles/triples kill it. HR is a separate prop. Singles are fine.
-    # Hit_Score plays a minor role — contact volume matters but type matters more.
     df['Under_XB_Score'] = (
         (100 - xb)  * 0.55
       + (100 - hr)  * 0.30
       + (100 - hit) * 0.15
-      + k_bonus + p_bonus
+      + k_bonus + bb_xb + p_bonus
     ).clip(0, 100).round(1)
 
     # ── TB Under 1.5 ─────────────────────────────────────────────────────────
-    # CORRECT LOGIC: A single = 1 base = CASHES the under. Singles do NOT kill it.
-    # Only XB (2 bases) and HR (4 bases) lose this bet.
-    # Players with high Single_Score but low XB/HR are IDEAL — they make contact
-    # but it stays in the yard and doesn't accumulate multiple bases.
-    # Bonus when Single_Score > XB_Score = true singles profile.
     single_profile_bonus = ((single - xb) * 0.15).clip(lower=0, upper=5)
     df['Under_TB15_Score'] = (
         (100 - xb)  * 0.55
       + (100 - hr)  * 0.35
-      + single_profile_bonus   # reward true singles hitters
-      + k_bonus + p_bonus
+      + single_profile_bonus
+      + k_bonus + bb_tb15 + p_bonus
     ).clip(0, 100).round(1)
 
     # ── TB Under 0.5 ─────────────────────────────────────────────────────────
-    # Need the player to get ZERO total bases. Any hit kills it.
-    # Walks are fine (0 TB). Strikeout = 0 TB = WIN.
-    # All offensive score routes are dangerous here.
     df['Under_TB05_Score'] = (
         (100 - hit) * 0.45
       + (100 - xb)  * 0.30
       + (100 - hr)  * 0.25
-      + k_bonus * 1.2   # slightly higher K weight — strikeout = guaranteed win
-      + p_bonus
+      + k_bonus * 1.2
+      + bb_tb05 + p_bonus
     ).clip(0, 100).round(1)
 
-    # ── Hit Under (0.5 line, same math as TB 0.5 — different book label) ────
-    # Any base hit kills it. K% is most critical signal.
+    # ── Hit Under ─────────────────────────────────────────────────────────────
     df['Under_Hit_Score'] = (
         (100 - hit) * 0.70
       + k_bonus * 1.5
-      + p_bonus
+      + bb_hit + p_bonus
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────
@@ -268,6 +268,10 @@ def build_under_filters(df: pd.DataFrame) -> dict:
         "Min K Prob % (higher = better under)", 0.0, 50.0, 15.0, 0.5,
         help="Focus on batters facing high strikeout matchups"
     )
+    filters['min_bb'] = st.sidebar.slider(
+        "Min BB Prob % (higher = more walks = better under)", 0.0, 20.0, 0.0, 0.5,
+        help="Walks = 0 bases/hits. High walk rate is one of the strongest under signals."
+    )
     filters['max_hit_prob'] = st.sidebar.slider(
         "Max Hit Prob % (lower = better under)", 0.0, 50.0, 35.0, 0.5,
         help="Exclude players with high overall hit probability"
@@ -331,6 +335,8 @@ def apply_under_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     # Under-specific stat filters
     if 'p_k' in out.columns:
         out = out[pd.to_numeric(out['p_k'], errors='coerce').fillna(0) >= filters['min_k']]
+    if 'p_bb' in out.columns and filters.get('min_bb', 0) > 0:
+        out = out[pd.to_numeric(out['p_bb'], errors='coerce').fillna(0) >= filters['min_bb']]
     if 'total_hit_prob' in out.columns:
         out = out[pd.to_numeric(out['total_hit_prob'], errors='coerce').fillna(100)
                   <= filters['max_hit_prob']]
@@ -343,10 +349,22 @@ def apply_under_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     if not filters.get('show_disq') and disq_col in out.columns:
         out = out[~out[disq_col]]
 
-    # Sort by Under_Score descending (higher = better under candidate)
-    sc = filters['under_score_col']
+    # ── Profile-prioritized sort for under targets ────────────────────────────
+    # When show_disq=True, disqualified players are visible but always ranked
+    # below non-disqualified players — regardless of their Under_Score.
+    # This ensures users see the cleanest candidates first.
+    sc  = filters['under_score_col']
+    disq_col = filters['under_disq_col']
     if sc in out.columns:
-        out = out.sort_values(sc, ascending=False, na_position='last')
+        if filters.get('show_disq') and disq_col in out.columns:
+            out['_disq_rank'] = out[disq_col].astype(int)   # 0=clean, 1=disqualified
+            out = out.sort_values(
+                ['_disq_rank', sc],
+                ascending=[True, False],
+                na_position='last'
+            ).drop(columns=['_disq_rank'])
+        else:
+            out = out.sort_values(sc, ascending=False, na_position='last')
 
     n = filters['result_count']
     if n != "All":
@@ -530,7 +548,60 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
     if 'P.Grd' in out_df.columns:
         styled = styled.map(style_grade_cell, subset=['P.Grd'])
 
-    st.dataframe(styled, width='stretch')
+    # BB%: Green gradient (high BB = fewer at-bats producing bases)
+    if 'BB%' in out_df.columns:
+        try:
+            styled = styled.background_gradient(subset=['BB%'], cmap='Greens', vmin=5, vmax=20)
+        except Exception:
+            pass
+
+    # ── Under Tier column ─────────────────────────────────────────────────────
+    under_label = label_map.get(sc, 'Under Score')
+    if under_label in out_df.columns:
+        u_tier = lambda s: (
+            "🟢 ELITE"  if s >= 75 else
+            "🟡 STRONG" if s >= 60 else
+            "🟠 GOOD"   if s >= 45 else
+            "🔴 MODERATE" if s >= 30 else "⚫ WEAK"
+        )
+        tier_vals = out_df[under_label].apply(
+            lambda x: u_tier(float(x)) if pd.notna(x) else "—"
+        )
+        insert_at = out_df.columns.get_loc(under_label) + 1
+        out_df.insert(insert_at, 'Tier', tier_vals)
+
+    # ── Column config ─────────────────────────────────────────────────────────
+    col_cfg: dict = {}
+    try:
+        import streamlit as _st
+        CC = _st.column_config
+        col_cfg['Batter'] = CC.TextColumn("Batter", width="medium")
+        col_cfg['Team']   = CC.TextColumn("Team",   width="small")
+        col_cfg['Status'] = CC.TextColumn("Status", width="small",
+                                          help="✅ = clean candidate · ⚠️ = disqualified (offsetting high score)")
+        col_cfg['Tier']   = CC.TextColumn("Tier", width="small",
+                                          help="Under Score tier: ELITE ≥75 · STRONG ≥60 · GOOD ≥45")
+        if under_label in out_df.columns:
+            col_cfg[under_label] = CC.NumberColumn(
+                under_label, format="%.1f", min_value=0, max_value=100,
+                help="Under Score 0–100. Higher = stronger under candidate."
+            )
+        if 'Market Edge' in out_df.columns:
+            col_cfg['Market Edge'] = CC.TextColumn(
+                "Market Edge", width="small",
+                help="⚡ EDGE = model likes under more than market. ✅ CONFIRMED = both agree."
+            )
+        for odds_col in ['TB Under','TB Over','HR Odds']:
+            if odds_col in out_df.columns:
+                col_cfg[odds_col] = CC.TextColumn(odds_col, width="small")
+        if 'TB Line' in out_df.columns:
+            col_cfg['TB Line'] = CC.TextColumn("TB Line", width="small",
+                                               help="Sportsbook line: 0.5 or 1.5 total bases")
+    except Exception:
+        col_cfg = {}
+
+    st.dataframe(styled, use_container_width=True,
+                 column_config=col_cfg or None, hide_index=False)
 
     # Legend
     disq_note = {

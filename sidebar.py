@@ -192,7 +192,38 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
         sc_s = sc_s.replace('_gc','') if sc_s.endswith('_gc') else sc_s
     if sc_s in out.columns:
         out[sc_s] = pd.to_numeric(out[sc_s], errors='coerce')
-        out = out.sort_values(sc_s, ascending=filters['sort_asc'], na_position='last')
+
+        # ── Profile-prioritized sort ───────────────────────────────────────────
+        # For Single and XB targets: profile-eligible players always rank above
+        # profile-mismatched ones, even if their raw score is lower.
+        # Mismatched players are still shown (visible but ranked below eligibles).
+        #
+        # Single: mismatched = XB_Score > Single_Score OR HR_Score > Single_Score
+        # XB:     mismatched = HR_Score > XB_Score
+        # Hit/HR: no profile ranking — sort purely by score
+        sc_base_for_sort = filters.get('score_col_base', sc_s.replace('_gc',''))
+        is_profile_target = sc_base_for_sort in ('Single_Score', 'XB_Score')
+
+        if is_profile_target and not out.empty:
+            if sc_base_for_sort == 'Single_Score':
+                mismatch = pd.Series(False, index=out.index)
+                if 'XB_Score' in out.columns:
+                    mismatch |= (out['XB_Score'] > out['Single_Score'])
+                if 'HR_Score' in out.columns:
+                    mismatch |= (out['HR_Score'] > out['Single_Score'])
+            else:   # XB_Score
+                mismatch = pd.Series(False, index=out.index)
+                if 'HR_Score' in out.columns:
+                    mismatch |= (out['HR_Score'] > out['XB_Score'])
+
+            out['_profile_rank'] = mismatch.astype(int)   # 0=eligible, 1=mismatch
+            out = out.sort_values(
+                ['_profile_rank', sc_s],
+                ascending=[True, filters['sort_asc']],
+                na_position='last'
+            ).drop(columns=['_profile_rank'])
+        else:
+            out = out.sort_values(sc_s, ascending=filters['sort_asc'], na_position='last')
 
     n = filters['result_count']
     if n != "All":

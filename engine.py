@@ -378,33 +378,23 @@ def compute_scores(df: pd.DataFrame,
             df[col] = (df[col] + platoon_adj).clip(0,100).round(1)
 
     # ── Stage 4: Cross-score profile correction ───────────────────────────────
-    # Problem: a player can rank #1 for Singles even though their XB or HR score
-    # is significantly higher, meaning their contact profile produces extra bases
-    # more than singles. Betting them for a single when they're more likely to
-    # double is a profile mismatch that loses the prop.
+    # Penalise Single_Score when XB or HR significantly exceeds it.
+    # Tightened from original so profile-mismatched players (like Garcia)
+    # consistently rank BELOW true singles hitters (like Jungle Lee).
     #
-    # Fix: penalise Single_Score when XB_Score or HR_Score exceeds it materially.
+    # Garcia example (XB=82, Hit=84, Single=70):
+    #   Old: gap=12 → excess=4 → penalty=1.6 pts  (too weak)
+    #   New: gap=12 → excess=7 → penalty=4.2 pts  (Lee at 75 now clearly wins)
     #
-    # XB gap penalty:
-    #   If XB_Score > Single_Score + XB_GAP_THRESHOLD (8 pts):
-    #   penalty = (gap - threshold) × XB_RATE (0.40), capped at XB_MAX (8 pts)
-    #   Rationale: 8 pts gap means meaningfully different contact profiles.
-    #   0.40 rate means each extra pt of gap costs 0.4 pts in Single_Score.
-    #   Example: Clement XB=85.7, Single=71.0 → gap=14.7 → excess=6.7 → -2.7 pts
-    #
-    # HR gap penalty (lighter — power hitters sometimes still hit singles):
-    #   If HR_Score > Single_Score + HR_GAP_THRESHOLD (12 pts):
-    #   penalty = (gap - threshold) × HR_RATE (0.25), capped at HR_MAX (5 pts)
-    #
-    # Applied to base scores identically so Park Δ is unaffected.
-    # Hit_Score is NOT penalised — "any hit" includes XB so high XB is fine.
+    # Thresholds deliberately kept at a floor so incidental score differences
+    # (1-3 pts) don't trigger a penalty — only meaningful profile mismatches do.
 
-    XB_GAP_THRESHOLD = 8.0
-    XB_RATE          = 0.40
-    XB_MAX           = 8.0
-    HR_GAP_THRESHOLD = 12.0
-    HR_RATE          = 0.25
-    HR_MAX           = 5.0
+    XB_GAP_THRESHOLD = 5.0    # was 8 — catch gaps earlier
+    XB_RATE          = 0.60   # was 0.40 — stronger penalty per gap point
+    XB_MAX           = 12.0   # was 8 — allow larger total penalty for large gaps
+    HR_GAP_THRESHOLD = 10.0   # was 12 — catch power profiles earlier
+    HR_RATE          = 0.40   # was 0.25 — slightly stronger
+    HR_MAX           = 7.0    # was 5
 
     if 'XB_Score' in df.columns and 'Single_Score' in df.columns:
         xb_gap  = (df['XB_Score'] - df['Single_Score'] - XB_GAP_THRESHOLD).clip(lower=0)

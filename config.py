@@ -77,6 +77,13 @@ CONFIG = {
     'under_pitcher_bonus': 4.0,    # bonus pts for facing A+ pitcher
     'under_pitcher_a':     2.0,    # bonus pts for facing A pitcher
 
+    # BB% bonus weights per under type (walk = 0 bases = always favorable for unders)
+    # Higher weight = BB% matters more for that prop type
+    'under_bb_weight_xb':   0.5,   # XB Under: walks good but contact quality is primary
+    'under_bb_weight_tb15': 0.8,   # TB 1.5: walks are 0 bases, great for this line
+    'under_bb_weight_tb05': 1.0,   # TB 0.5: walks are ideal — guaranteed 0 bases
+    'under_bb_weight_hit':  1.2,   # Hit Under: walk = no hit, best possible outcome
+
     # ── Hot park extra boost (gc_hr4 > 2× median = 24.4%) ────────────────────
     # Applied as flat +pts to HR_Score_gc for ALL batters in that game.
     # Rewards entire lineups in genuinely HR-friendly park/game environments.

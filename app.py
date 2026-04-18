@@ -29,6 +29,7 @@ from renders import (render_header, render_stat_bar, render_score_summary_cards,
                      render_player_deep_dive, render_staleness_warning)
 from player_profile import player_profile_page
 from parlay import parlay_page
+from unders import under_page
 from reference import info_page
 from loader import (load_matchups, load_pitcher_data, load_game_conditions,
                     load_pitcher_qs, merge_pitcher_data, merge_game_conditions)
@@ -293,7 +294,7 @@ def main():
 
     page = st.sidebar.radio(
         "Navigate",
-        ["⚾ Predictor","👤 Player Profile","⚡ Parlay Builder","📚 Reference Manual"],
+        ["⚾ Predictor","👤 Player Profile","🔻 Under Targets","⚡ Parlay Builder","📚 Reference Manual"],
         index=0,
     )
 
@@ -325,6 +326,19 @@ def main():
                                 order_map=order_map,
                                 form_map=form_map,
                                 handedness_map=handedness_map)
+
+    elif page == "🔻 Under Targets":
+        render_staleness_warning()
+        if raw_df is None:
+            st.error("❌ Could not load Matchups data.")
+        else:
+            with st.spinner("Loading slate data…"):
+                order_map, form_map, handedness_map = _fetch_signal_data()
+                df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
+                                      use_park=True, use_gc=True,
+                                      order_map=order_map, form_map=form_map,
+                                      handedness_map=handedness_map)
+            under_page(df, filters_base={})
 
     elif page == "⚡ Parlay Builder":
         if raw_df is None:

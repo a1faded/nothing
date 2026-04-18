@@ -50,6 +50,33 @@ CONFIG = {
     # ── Statcast overlay cap ──────────────────────────────────────────────────
     'sc_max_total_adj': 10.0,
 
+    # ── Under targets — disqualification cutoffs ──────────────────────────────
+    # A player is DISQUALIFIED from an under target when their score in an
+    # offsetting category is too high — meaning they can still accumulate
+    # bases through a different route than the one being targeted.
+    #
+    # XB Under: looking for players unlikely to hit a double or triple.
+    #   Disqualify if HR_Score > 55 (they can still clear the fence)
+    #   Disqualify if Hit_Score > 68 (high general contact volume is dangerous)
+    #
+    # TB Under (total bases under 1.5 or 2.0):
+    #   Disqualify if ANY of Hit/XB/HR_Score > 55 (any route produces bases)
+    #
+    # Hit Under (no hit, 0.5 line):
+    #   Disqualify if Hit_Score > 42 (any meaningful hit probability is too risky)
+    #
+    # These are tunable — tighten them to be more selective, loosen for more candidates.
+    'under_xb_disq_hr':    55.0,   # XB Under: disqualify if HR_Score above this
+    'under_xb_disq_hit':   68.0,   # XB Under: disqualify if Hit_Score above this
+    'under_tb_disq_any':   55.0,   # TB Under: disqualify if ANY score above this
+    'under_hit_disq_hit':  42.0,   # Hit Under: disqualify if Hit_Score above this
+
+    # Under scoring weights
+    # Under_Score = weighted sum of (100 - offensive_score) + K% bonus + pitcher bonus
+    'under_k_weight':      0.6,    # how much above-average K% boosts Under_Score
+    'under_pitcher_bonus': 4.0,    # bonus pts for facing A+ pitcher
+    'under_pitcher_a':     2.0,    # bonus pts for facing A pitcher
+
     # ── Hot park extra boost (gc_hr4 > 2× median = 24.4%) ────────────────────
     # Applied as flat +pts to HR_Score_gc for ALL batters in that game.
     # Rewards entire lineups in genuinely HR-friendly park/game environments.

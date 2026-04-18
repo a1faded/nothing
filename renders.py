@@ -145,37 +145,6 @@ def _profile_badge(row: pd.Series, target_sc: str) -> str:
             )
 
     return badge
-        xb_gap = xb - single
-        hr_gap = hr - single
-        if xb_gap >= 12:
-            badge = (
-                '<span style="background:#1c1400;color:#f59e0b;padding:1px 7px;'
-                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
-                'font-family:\'JetBrains Mono\',monospace">⚡ XB PROFILE</span>'
-            )
-        elif xb_gap >= 7:
-            badge = (
-                '<span style="background:#1c1000;color:#fb923c;padding:1px 7px;'
-                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
-                'font-family:\'JetBrains Mono\',monospace">⚡ XB LEAN</span>'
-            )
-        elif hr_gap >= 15:
-            badge = (
-                '<span style="background:#1c0000;color:#f87171;padding:1px 7px;'
-                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
-                'font-family:\'JetBrains Mono\',monospace">💣 POWER PROFILE</span>'
-            )
-
-    elif target_sc == 'XB_Score':
-        hr_gap = hr - xb
-        if hr_gap >= 12:
-            badge = (
-                '<span style="background:#1c0000;color:#f87171;padding:1px 7px;'
-                'border-radius:20px;font-size:.62rem;font-weight:700;margin-left:.3rem;'
-                'font-family:\'JetBrains Mono\',monospace">💣 HR PROFILE</span>'
-            )
-
-    return badge
 
 
 # ─────────────────────────────────────────────────────────────────────────────

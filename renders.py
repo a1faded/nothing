@@ -574,12 +574,19 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         tier_vals = out_df[active_label].apply(
             lambda x: tier_map(float(x)) if pd.notna(x) else "—"
         )
-        # Insert Tier right after active score column
         insert_at = out_df.columns.get_loc(active_label) + 1
+        out_df    = out_df.copy()       # decouple before mutation
         out_df.insert(insert_at, 'Tier', tier_vals)
+
+    # Text-only columns that must never receive a numeric format string
+    _text_cols = {'Tier', 'Profile', 'Form', 'Pos', 'Market Edge',
+                  'TB Line', 'TB Under', 'TB Over', 'HR Odds', 'P.Grd',
+                  'Batter', 'Team', 'Pitcher'}
 
     fmt = {}
     for cn in out_df.columns:
+        if cn in _text_cols:
+            continue                    # skip — no format for string columns
         if cn in ['Hit%','1B%','XB%','HR%','K%','BB%','Barrel%','HH%']:
             fmt[cn] = "{:.1f}%"
         elif cn in ['K% ↓Lg','BB% ↓Lg']:

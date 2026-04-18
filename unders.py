@@ -509,19 +509,41 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
                [c for c in col_order_extra if c in disp.columns]
     out_df   = disp[existing].rename(columns=rename)
 
+    # ── Under Tier column — insert BEFORE styler is created ───────────────────
+    # Must happen before out_df.style.format() — mutating after styler creation
+    # causes pandas to crash with a format error on the new string column.
+    under_label = label_map.get(sc, 'Under Score')
+    if under_label in out_df.columns:
+        u_tier = lambda s: (
+            "🟢 ELITE"    if s >= 75 else
+            "🟡 STRONG"   if s >= 60 else
+            "🟠 GOOD"     if s >= 45 else
+            "🔴 MODERATE" if s >= 30 else "⚫ WEAK"
+        )
+        tier_vals = out_df[under_label].apply(
+            lambda x: u_tier(float(x)) if pd.notna(x) else "—"
+        )
+        insert_at = out_df.columns.get_loc(under_label) + 1
+        out_df    = out_df.copy()          # decouple from disp before insert
+        out_df.insert(insert_at, 'Tier', tier_vals)
+
+    _text_cols = {'Tier', 'Status', 'Market Edge', 'TB Line', 'TB Under',
+                  'TB Over', 'HR Odds', 'P.Grd', 'Batter', 'Team', 'Pitcher'}
+
     fmt = {}
     for cn in out_df.columns:
+        if cn in _text_cols:
+            continue
         if cn in ['K%','BB%','Hit%','1B%','XB%','HR%']:
             fmt[cn] = "{:.1f}%"
-        elif cn in ['🎯 Hit','🔥 XB','💣 HR', label_map.get(sc,'')]:
+        elif cn in ['🎯 Hit','🔥 XB','💣 HR', under_label]:
             fmt[cn] = "{:.1f}"
         elif cn == 'vsPit':
             fmt[cn] = "{:.0f}"
 
     styled = out_df.style.format(fmt, na_rep="—")
 
-    # Under_Score: purple gradient (high = good under)
-    under_label = label_map.get(sc, 'Under Score')
+    # Under_Score gradient
     if under_label in out_df.columns:
         try:
             styled = styled.background_gradient(
@@ -530,7 +552,7 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         except Exception:
             pass
 
-    # Offensive scores: Red gradient (low = good for under)
+    # Offensive scores: reversed gradient (low = good for under)
     for col, cmap in [('🎯 Hit','RdYlGn_r'),('🔥 XB','RdYlGn_r'),('💣 HR','RdYlGn_r')]:
         if col in out_df.columns:
             try:
@@ -538,37 +560,20 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
             except Exception:
                 pass
 
-    # K%: Green gradient (high K = good for under)
     if 'K%' in out_df.columns:
         try:
             styled = styled.background_gradient(subset=['K%'], cmap='Greens', vmin=10, vmax=40)
         except Exception:
             pass
 
-    if 'P.Grd' in out_df.columns:
-        styled = styled.map(style_grade_cell, subset=['P.Grd'])
-
-    # BB%: Green gradient (high BB = fewer at-bats producing bases)
     if 'BB%' in out_df.columns:
         try:
             styled = styled.background_gradient(subset=['BB%'], cmap='Greens', vmin=5, vmax=20)
         except Exception:
             pass
 
-    # ── Under Tier column ─────────────────────────────────────────────────────
-    under_label = label_map.get(sc, 'Under Score')
-    if under_label in out_df.columns:
-        u_tier = lambda s: (
-            "🟢 ELITE"  if s >= 75 else
-            "🟡 STRONG" if s >= 60 else
-            "🟠 GOOD"   if s >= 45 else
-            "🔴 MODERATE" if s >= 30 else "⚫ WEAK"
-        )
-        tier_vals = out_df[under_label].apply(
-            lambda x: u_tier(float(x)) if pd.notna(x) else "—"
-        )
-        insert_at = out_df.columns.get_loc(under_label) + 1
-        out_df.insert(insert_at, 'Tier', tier_vals)
+    if 'P.Grd' in out_df.columns:
+        styled = styled.map(style_grade_cell, subset=['P.Grd'])
 
     # ── Column config ─────────────────────────────────────────────────────────
     col_cfg: dict = {}

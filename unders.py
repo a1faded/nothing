@@ -47,19 +47,27 @@ from helpers import grade_pill, style_grade_cell
 def compute_under_scores(df: pd.DataFrame,
                          form_map: dict | None = None) -> pd.DataFrame:
     """
-    Adds four Under_Score columns to the slate df. Vectorized.
+    Full 8-layer under score computation. Vectorized throughout.
 
-    Signal layers (in order of weight):
-      1. Inverted offensive scores (Hit/XB/HR_Score) — primary signal
-      2. K% bonus — strikeouts = 0 bases
-      3. BB% bonus — walks = 0 bases (especially important for TB/Hit unders)
-      4. Pitcher grade bonus — elite pitchers suppress all contact
-      5. Historical matchup AVG/PA — vs this pitcher type (from BallPark Pal)
-      6. Recent XB rate (7-day) — player on XB tear? Penalise XB/TB unders.
-      7. xSLG (Statcast expected slugging) — power/XB tendency from full season
+    Signal architecture:
+      Layer 1 — Primary offensive scores (inverted BallPark Pal scores)
+      Layer 2 — K% and BB% (non-contact plate appearance outcomes)
+      Layer 3 — Pitcher grade
+      Layer 4 — Historical matchup AVG/PA (BallPark Pal)
+      Layer 5 — Recent XB rate (7-day 2B+3B/G from pybaseball)
+      Layer 6 — Recent hit rate (7-day H/G — cold hitter signal for Hit Under)
+      Layer 7 — Statcast contact quality (Barrel%, HH%, AvgEV, xSLG, xBA, xwOBA)
+      Layer 8 — vs Grade + park factor (matchup context)
 
-    form_map: {batter_name: {xb_rate, hit_rate, ...}} from get_recent_batting_form()
-              Optional — scoring degrades gracefully to 0 if not provided.
+    All Statcast signals default to 0.0 when NaN (Option A — neutral, not penalty).
+    All form_map signals default to 0.0 when player not in map or <3 games.
+    All historical signals default to 0.0 when PA < under_hist_min_pa.
+
+    Per-type signal relevance:
+      XB Under:   Layers 1(XB+HR) 2 3 4 5 7(Barrel%,HH%,AvgEV,xSLG) 8
+      TB 1.5:     Layers 1(XB+HR) 2 3 4 5 7(xSLG) 8
+      TB 0.5:     Layers 1(all)   2 3 4 6 7(xBA,xwOBA) 8
+      Hit Under:  Layers 1(Hit)   2 3 4 6 7(xBA,xwOBA) 8
     """
     df       = df.copy()
     cfg      = CONFIG
@@ -69,123 +77,240 @@ def compute_under_scores(df: pd.DataFrame,
         if col not in df.columns:
             df[col] = 50.0
 
+    # ── Primary score series ──────────────────────────────────────────────────
     hit    = df['Hit_Score'].clip(0, 100)
     single = df['Single_Score'].clip(0, 100)
     xb     = df['XB_Score'].clip(0, 100)
     hr     = df['HR_Score'].clip(0, 100)
-    k      = pd.to_numeric(df.get('p_k', 0), errors='coerce').fillna(0)
-    bb     = pd.to_numeric(df.get('p_bb',0), errors='coerce').fillna(0)
 
-    # ── Signal 1: K% bonus ────────────────────────────────────────────────────
+    # ── Raw probability columns (BallPark Pal) ────────────────────────────────
+    k  = pd.to_numeric(df.get('p_k',  0), errors='coerce').fillna(0)
+    bb = pd.to_numeric(df.get('p_bb', 0), errors='coerce').fillna(0)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 2 — K% and BB% bonuses
+    # ─────────────────────────────────────────────────────────────────────────
     k_bonus = ((k - cfg['league_k_avg']) * cfg['under_k_weight']).clip(lower=0)
 
-    # ── Signal 2: BB% bonus ───────────────────────────────────────────────────
-    bb_xb   = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_xb',   0.5)).clip(lower=0)
-    bb_tb15 = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_tb15', 0.8)).clip(lower=0)
-    bb_tb05 = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_tb05', 1.0)).clip(lower=0)
-    bb_hit  = ((bb - cfg['league_bb_avg']) * cfg.get('under_bb_weight_hit',  1.2)).clip(lower=0)
+    bb_xb   = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_xb']  ).clip(lower=0)
+    bb_tb15 = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_tb15']).clip(lower=0)
+    bb_tb05 = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_tb05']).clip(lower=0)
+    bb_hit  = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_hit'] ).clip(lower=0)
 
-    # ── Signal 3: Pitcher grade bonus ─────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 3 — Pitcher grade bonus
+    # ─────────────────────────────────────────────────────────────────────────
     def _pgbonus(grade):
         return (cfg['under_pitcher_bonus'] if grade == 'A+' else
                 cfg['under_pitcher_a']     if grade == 'A'  else 0.0)
+
     p_bonus = df['pitch_grade'].apply(_pgbonus) \
               if 'pitch_grade' in df.columns \
               else pd.Series(0.0, index=df.index)
 
-    # ── Signal 4: Historical matchup AVG vs pitcher type ──────────────────────
-    # Source: BallPark Pal PA/H/AVG columns — already in df.
-    # Below-league-AVG history = bonus (struggles here historically).
-    # Above-league-AVG history = penalty (hits well here).
-    # Minimum PA threshold prevents small-sample noise from dominating.
-    # Weight varies by under type — AVG most directly relevant to Hit Under.
-    hist_min_pa = cfg.get('under_hist_min_pa', 5)
-    hist_weight = cfg.get('under_hist_weight', 18.0)
-    hist_max    = cfg.get('under_hist_max_adj', 5.0)
-    league_avg  = cfg['league_avg']   # 0.2445
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 4 — Historical matchup AVG/PA
+    # ─────────────────────────────────────────────────────────────────────────
+    hist_min_pa = cfg['under_hist_min_pa']
+    hist_weight = cfg['under_hist_weight']
+    hist_max    = cfg['under_hist_max_adj']
+    league_avg  = cfg['league_avg']
 
     pa_col  = pd.to_numeric(df.get('PA',  0), errors='coerce').fillna(0)
     avg_col = pd.to_numeric(df.get('AVG', 0), errors='coerce').fillna(0)
 
-    # Only fire when PA >= threshold; zero otherwise (neutral — no penalty, no bonus)
-    hist_raw  = (league_avg - avg_col) * hist_weight   # positive = below avg = good
+    hist_raw  = (league_avg - avg_col) * hist_weight
     hist_base = hist_raw.where(pa_col >= hist_min_pa, 0.0).clip(-hist_max, hist_max)
 
-    # Per-type scaling — AVG matters most for Hit Under, moderately for TB/XB
     hist_xb   = hist_base * 0.6
     hist_tb15 = hist_base * 0.8
     hist_tb05 = hist_base * 1.0
     hist_hit  = hist_base * 1.2
 
-    # ── Signal 5: Recent XB rate (7-day batch) ────────────────────────────────
-    # Source: form_map['xb_rate'] = (2B+3B)/G from batting_stats_range().
-    # High recent XB rate = player on an extra-base tear = bad for XB/TB unders.
-    # Low recent XB rate = player hasn't been going for extra bases = good.
-    # Only applied to XB and TB 1.5 unders (not Hit/TB05 where singles matter too).
-    xb_rate_lg  = cfg.get('under_xb_rate_lg_avg',  0.25)
-    xb_rate_w   = cfg.get('under_xb_rate_weight',   8.0)
-    xb_rate_max = cfg.get('under_xb_rate_max_adj',  4.0)
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 5 — Recent XB rate (7-day 2B+3B/G)
+    # ─────────────────────────────────────────────────────────────────────────
+    xb_rate_lg  = cfg['under_xb_rate_lg_avg']
+    xb_rate_w   = cfg['under_xb_rate_weight']
+    xb_rate_max = cfg['under_xb_rate_max_adj']
 
-    def _xb_rate_signal(batter: str) -> float:
+    def _xb_rate_sig(batter: str) -> float:
         info = form_map.get(batter, {})
         if not info or info.get('games', 0) < 3:
             return 0.0
         rate = info.get('xb_rate', xb_rate_lg)
-        # Below league avg = bonus (staying in park); above = penalty (hitting XBs)
-        return float(np.clip((xb_rate_lg - rate) * xb_rate_w, -xb_rate_max, xb_rate_max))
+        return float(np.clip((xb_rate_lg - rate) * xb_rate_w,
+                             -xb_rate_max, xb_rate_max))
 
-    xb_rate_adj = df['Batter'].apply(_xb_rate_signal)
+    xb_rate_adj = df['Batter'].apply(_xb_rate_sig)
 
-    # ── Signal 6: xSLG from Statcast ──────────────────────────────────────────
-    # Expected slugging measures power/XB tendency using launch angle + exit velocity.
-    # High xSLG = player is a true extra-base threat even if recent stats don't show it.
-    # Applied only to XB Under — moderate weight, confirmation layer.
-    xslg_lg = cfg['league_xslg']    # 0.400
-    xslg_adj = pd.Series(0.0, index=df.index)
-    if 'xSLG' in df.columns:
-        xslg_vals = pd.to_numeric(df['xSLG'], errors='coerce').fillna(xslg_lg)
-        # Below league xSLG = bonus (less power); above = penalty (power threat)
-        xslg_adj = ((xslg_lg - xslg_vals) * 12.0).clip(-4.0, 4.0)
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 6 — Recent hit rate (7-day H/G) — cold hitter signal
+    # Applied to Hit Under and TB 0.5 — not XB/TB15 (singles are neutral there)
+    # ─────────────────────────────────────────────────────────────────────────
+    hit_rate_lg  = cfg['under_hit_rate_lg_avg']
+    hit_rate_w   = cfg['under_hit_rate_weight']
+    hit_rate_max = cfg['under_hit_rate_max_adj']
 
-    # ── Compute final scores ──────────────────────────────────────────────────
+    def _hit_rate_sig(batter: str) -> float:
+        info = form_map.get(batter, {})
+        if not info or info.get('games', 0) < 3:
+            return 0.0
+        rate = info.get('hit_rate', hit_rate_lg)
+        return float(np.clip((hit_rate_lg - rate) * hit_rate_w,
+                             -hit_rate_max, hit_rate_max))
+
+    hit_rate_adj = df['Batter'].apply(_hit_rate_sig)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 7 — Statcast contact quality (all neutral when NaN)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _sc(col: str, lg_val: float) -> pd.Series:
+        """Return Statcast column as Series, filling NaN with league average (neutral)."""
+        if col not in df.columns:
+            return pd.Series(lg_val, index=df.index)
+        return pd.to_numeric(df[col], errors='coerce').fillna(lg_val)
+
+    # XB / power signals
+    barrel = _sc('Barrel%', cfg['league_barrel_pct'])   # lg ~7.5%
+    hh     = _sc('HH%',     cfg['league_hh_pct'])       # lg ~38.0%
+    avgev  = _sc('AvgEV',   cfg['league_avgev'])         # lg ~88.5 mph
+    xslg   = _sc('xSLG',    cfg['league_xslg'])          # lg ~0.400
+
+    # (lg - player) → positive when player is below league avg = good for under
+    barrel_adj = ((cfg['league_barrel_pct'] - barrel) * cfg['under_barrel_weight']
+                  ).clip(-cfg['under_barrel_max'], cfg['under_barrel_max'])
+    hh_adj     = ((cfg['league_hh_pct'] - hh) * cfg['under_hh_weight']
+                  ).clip(-cfg['under_hh_max'], cfg['under_hh_max'])
+    avgev_adj  = ((cfg['league_avgev'] - avgev) * cfg['under_avgev_weight']
+                  ).clip(-cfg['under_avgev_max'], cfg['under_avgev_max'])
+    xslg_adj   = ((cfg['league_xslg'] - xslg) * cfg['under_xslg_weight']
+                  ).clip(-cfg['under_xslg_max'], cfg['under_xslg_max'])
+
+    # Contact quality signals (hit probability predictors)
+    xba   = _sc('xBA',   cfg['league_xba'])    # lg ~0.248
+    xwoba = _sc('xwOBA', cfg['league_xwoba'])  # lg ~0.320
+
+    xba_adj   = ((cfg['league_xba']   - xba)   * cfg['under_xba_weight']
+                 ).clip(-cfg['under_xba_max'], cfg['under_xba_max'])
+    xwoba_adj = ((cfg['league_xwoba'] - xwoba) * cfg['under_xwoba_weight']
+                 ).clip(-cfg['under_xwoba_max'], cfg['under_xwoba_max'])
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 8 — vs Grade + park XB factor
+    # ─────────────────────────────────────────────────────────────────────────
+    # vs Grade: negative grade means pitcher dominates this matchup historically
+    # Clip at 0 on both sides — we want the signal to fire for weak matchups only
+    vs_grade = pd.to_numeric(df.get('vs Grade', 0), errors='coerce').fillna(0)
+    # Negative grade = bonus (pitcher wins this matchup)
+    # Positive grade = neutral (good matchup for batter — already penalised by scores)
+    vsgrade_adj = ((-vs_grade).clip(lower=0) * cfg['under_vsgrade_weight']
+                   ).clip(0, cfg['under_vsgrade_max'])
+
+    # Park XB factor: high xb_boost = park amplifies XB opportunities = penalty for XB unders
+    xb_boost = pd.to_numeric(df.get('xb_boost', 0), errors='coerce').fillna(0)
+    parkxb_pen = (xb_boost * cfg['under_parkxb_weight']
+                  ).clip(0, cfg['under_parkxb_max'])
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FINAL SCORES — all layers combined
+    # ─────────────────────────────────────────────────────────────────────────
+
     # ── XB Under ─────────────────────────────────────────────────────────────
+    # Doubles/triples kill it. Singles fine. HR separate prop.
+    # Heaviest Statcast load: Barrel%, HH%, AvgEV, xSLG all apply.
     df['Under_XB_Score'] = (
-        (100 - xb)  * 0.50
-      + (100 - hr)  * 0.28
-      + (100 - hit) * 0.12
-      + k_bonus + bb_xb + p_bonus
-      + hist_xb              # matchup history
-      + xb_rate_adj          # recent XB tendency
-      + xslg_adj             # Statcast power profile
+        # Layer 1 — primary
+        (100 - xb)  * 0.42
+      + (100 - hr)  * 0.22
+      + (100 - hit) * 0.08
+        # Layer 2 — non-contact outcomes
+      + k_bonus + bb_xb
+        # Layer 3 — pitcher
+      + p_bonus
+        # Layer 4 — historical avg
+      + hist_xb
+        # Layer 5 — recent XB tendency
+      + xb_rate_adj
+        # Layer 7 — Statcast power signals
+      + barrel_adj           # strongest predictor of XBs
+      + hh_adj               # hard contact → XBs
+      + avgev_adj            # exit velocity → XBs
+      + xslg_adj             # expected slugging
+        # Layer 8 — context
+      + vsgrade_adj
+      - parkxb_pen           # high park factor = more XB opportunities = penalty
     ).clip(0, 100).round(1)
 
     # ── TB Under 1.5 ─────────────────────────────────────────────────────────
+    # Only XB and HR kill it. Singles CASH. Singles profile is a positive signal.
+    # Statcast: xSLG most relevant (overall extra-base tendency)
     single_profile_bonus = ((single - xb) * 0.15).clip(lower=0, upper=5)
     df['Under_TB15_Score'] = (
-        (100 - xb)  * 0.50
-      + (100 - hr)  * 0.32
+        # Layer 1
+        (100 - xb)  * 0.45
+      + (100 - hr)  * 0.28
       + single_profile_bonus
-      + k_bonus + bb_tb15 + p_bonus
-      + hist_tb15            # matchup history
-      + xb_rate_adj * 0.7   # recent XB matters but less for 1.5 line
+        # Layer 2
+      + k_bonus + bb_tb15
+        # Layer 3
+      + p_bonus
+        # Layer 4
+      + hist_tb15
+        # Layer 5 — XB rate still matters (doubles kill this line)
+      + xb_rate_adj * 0.7
+        # Layer 7 — xSLG only (overall power tendency, not granular contact quality)
+      + xslg_adj * 0.8
+      + barrel_adj * 0.5    # lighter — single XB counts here so barrel isn't all-bad
+        # Layer 8
+      + vsgrade_adj
+      - parkxb_pen * 0.5
     ).clip(0, 100).round(1)
 
     # ── TB Under 0.5 ─────────────────────────────────────────────────────────
+    # Zero bases needed. Any hit kills it. Walks and Ks are wins.
+    # All offensive score routes dangerous. xBA and xwOBA most relevant Statcast.
     df['Under_TB05_Score'] = (
-        (100 - hit) * 0.45
-      + (100 - xb)  * 0.30
-      + (100 - hr)  * 0.25
+        # Layer 1
+        (100 - hit) * 0.40
+      + (100 - xb)  * 0.28
+      + (100 - hr)  * 0.22
+        # Layer 2 — K and BB especially important here
       + k_bonus * 1.2
-      + bb_tb05 + p_bonus
-      + hist_tb05            # matchup history most relevant here
+      + bb_tb05
+        # Layer 3
+      + p_bonus
+        # Layer 4
+      + hist_tb05
+        # Layer 6 — recent hit rate (cold hitters)
+      + hit_rate_adj
+        # Layer 7 — contact quality (how likely is contact to become a hit)
+      + xba_adj   * 0.7
+      + xwoba_adj * 0.5
+        # Layer 8
+      + vsgrade_adj
     ).clip(0, 100).round(1)
 
     # ── Hit Under ─────────────────────────────────────────────────────────────
+    # Any base hit kills it. Highest variance prop — needs strongest convergence.
+    # xBA is the single best predictor — it measures contact quality → hit probability.
     df['Under_Hit_Score'] = (
-        (100 - hit) * 0.70
-      + k_bonus * 1.5
-      + bb_hit + p_bonus
-      + hist_hit             # AVG directly measures hit probability
+        # Layer 1
+        (100 - hit) * 0.45
+        # Layer 2 — K critical: strikeout = guaranteed no hit
+      + k_bonus * 1.8
+      + bb_hit
+        # Layer 3
+      + p_bonus
+        # Layer 4 — historical AVG most directly relevant prop
+      + hist_hit
+        # Layer 6 — cold hitters
+      + hit_rate_adj * 1.2
+        # Layer 7 — contact quality most important here
+      + xba_adj             # below-avg xBA = contact doesn't become hits
+      + xwoba_adj * 0.7     # overall offensive quality
+        # Layer 8
+      + vsgrade_adj * 1.2   # weak matchup matters most for no-hit prop
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────

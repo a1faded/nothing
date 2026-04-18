@@ -72,32 +72,57 @@ CONFIG = {
     'under_hit_disq_hit':  42.0,   # Hit Under: disqualify if Hit_Score above this
 
     # Under scoring weights
-    # Under_Score = weighted sum of (100 - offensive_score) + K% bonus + pitcher bonus
-    'under_k_weight':      0.6,    # how much above-average K% boosts Under_Score
-    'under_pitcher_bonus': 4.0,    # bonus pts for facing A+ pitcher
-    'under_pitcher_a':     2.0,    # bonus pts for facing A pitcher
+    # Under_Score = weighted sum of (100 - offensive_score) + signal layers
+    'under_k_weight':      0.6,    # K% bonus per point above league avg
+    'under_pitcher_bonus': 4.0,    # pts for facing A+ pitcher
+    'under_pitcher_a':     2.0,    # pts for facing A pitcher
 
-    # BB% bonus weights per under type (walk = 0 bases = always favorable for unders)
-    # Higher weight = BB% matters more for that prop type
-    'under_bb_weight_xb':   0.5,   # XB Under: walks good but contact quality is primary
-    'under_bb_weight_tb15': 0.8,   # TB 1.5: walks are 0 bases, great for this line
-    'under_bb_weight_tb05': 1.0,   # TB 0.5: walks are ideal — guaranteed 0 bases
-    'under_bb_weight_hit':  1.2,   # Hit Under: walk = no hit, best possible outcome
+    # BB% bonus weights per under type (walk = 0 bases = always favorable)
+    'under_bb_weight_xb':   0.5,
+    'under_bb_weight_tb15': 0.8,
+    'under_bb_weight_tb05': 1.0,
+    'under_bb_weight_hit':  1.2,
 
-    # Historical matchup signal (PA/AVG vs this pitcher type from BallPark Pal CSVs)
-    # AVG below league average = bonus (historically struggles here)
-    # AVG above league average = penalty (historically hits well here)
-    # Min PA threshold prevents small-sample noise from dominating
-    'under_hist_weight':    18.0,  # pts per unit of AVG deviation from league avg
-    'under_hist_min_pa':     5,    # minimum PA to apply hist signal (below = neutral)
-    'under_hist_max_adj':    5.0,  # max pts the hist signal can add or subtract
+    # Historical matchup signal (BallPark Pal PA/AVG)
+    'under_hist_weight':    18.0,  # pts per AVG unit below league avg
+    'under_hist_min_pa':     5,    # min PA to apply — below this = neutral
+    'under_hist_max_adj':    5.0,  # cap ±5 pts
 
-    # Recent XB rate signal from 7-day pybaseball batch (2B+3B)/G
-    # High recent XB rate = player is on an extra-base tear = bad for XB/TB unders
-    # Applied only to XB Under and TB 1.5 Under
-    'under_xb_rate_lg_avg':  0.25, # league avg XB/G (~1 XB per 4 games)
-    'under_xb_rate_weight':  8.0,  # pts per unit deviation from league avg
-    'under_xb_rate_max_adj': 4.0,  # cap ±4 pts — meaningful but not dominant
+    # Recent XB rate (7-day 2B+3B/G from pybaseball batch)
+    'under_xb_rate_lg_avg':  0.25, # league avg ~1 XB per 4 games
+    'under_xb_rate_weight':  8.0,
+    'under_xb_rate_max_adj': 4.0,
+
+    # Recent hit rate (7-day H/G) — cold hitters boost Hit Under
+    'under_hit_rate_lg_avg': 0.90, # league avg ~0.9 H/G
+    'under_hit_rate_weight': 4.0,  # lighter weight — form is noisy
+    'under_hit_rate_max_adj':3.0,  # cap ±3 pts
+
+    # Statcast signal weights (all gracefully neutral when NaN)
+    # XB / power signals — used for XB Under and TB 1.5
+    'under_barrel_weight':  1.2,   # Barrel% — strongest XB predictor
+    'under_barrel_max':     6.0,   # cap ±6 pts
+    'under_hh_weight':      0.8,   # HardHit% — hard contact = XBs
+    'under_hh_max':         4.0,
+    'under_avgev_weight':   0.15,  # AvgEV — velocity drives XBs
+    'under_avgev_max':      3.0,
+    'under_xslg_weight':   12.0,   # xSLG — overall power/XB tendency
+    'under_xslg_max':       4.0,
+
+    # Contact quality signals — used for Hit Under and TB 0.5
+    'under_xba_weight':    15.0,   # xBA — contact quality → hit probability
+    'under_xba_max':        5.0,
+    'under_xwoba_weight':  12.0,   # xwOBA — overall offensive quality
+    'under_xwoba_max':      4.0,
+
+    # vs Grade signal — negative grade = pitcher dominates = under boost
+    'under_vsgrade_weight': 0.3,   # pts per grade point below zero
+    'under_vsgrade_max':    3.0,   # cap ±3 pts (grade ranges -10 to +10)
+
+    # xb_boost park factor penalty for XB unders
+    # High park factor for XBs = more opportunities even for weak XB hitters
+    'under_parkxb_weight':  0.5,   # pts per xb_boost unit
+    'under_parkxb_max':     2.0,   # cap —only a small modifier
 
     # ── Hot park extra boost (gc_hr4 > 2× median = 24.4%) ────────────────────
     # Applied as flat +pts to HR_Score_gc for ALL batters in that game.

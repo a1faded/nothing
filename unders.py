@@ -46,67 +46,87 @@ from helpers import grade_pill, style_grade_cell
 
 def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds three Under_Score columns to the slate df.
-    Called once per page load — fast, vectorized.
+    Adds four Under_Score columns to the slate df. Vectorized.
 
-    Columns added:
-      Under_XB_Score   — how good a candidate for XB under
-      Under_TB_Score   — how good a candidate for total bases under
-      Under_Hit_Score  — how good a candidate for no-hit prop
-      _disq_xb         — True if disqualified for XB under
-      _disq_tb         — True if disqualified for TB under
-      _disq_hit        — True if disqualified for Hit under
+    Under types and what kills each bet:
+      XB Under:    Double or triple. Singles and HRs are separate props.
+      TB 1.5 Under: 2+ total bases. A SINGLE CASHES — only XB/HR kill it.
+      TB 0.5 Under: Any base hit (0 bases needed). Most restrictive.
+      Hit Under:   Any base hit. Functionally same as TB 0.5 — different book label.
+
+    Key insight on TB 1.5 (the most common line):
+      A player who goes 1-for-3 with a single CASHES the under.
+      Therefore Hit_Score being high is NEUTRAL for this bet — singles are fine.
+      Only XB_Score and HR_Score represent true danger (2+ bases per hit).
+      Single_Score being higher than XB_Score signals a true singles profile
+      which is POSITIVE for TB 1.5 — they make contact but it stays in the park.
+
+    Disqualification:
+      Each type has offsetting categories that can still accumulate bases.
+      Players exceeding the threshold in an offsetting category are flagged ⚠️.
     """
     df  = df.copy()
     cfg = CONFIG
 
-    # Safety: ensure score columns exist
     for col in ['Hit_Score','Single_Score','XB_Score','HR_Score']:
         if col not in df.columns:
             df[col] = 50.0
 
-    hit = df['Hit_Score'].clip(0, 100)
-    xb  = df['XB_Score'].clip(0, 100)
-    hr  = df['HR_Score'].clip(0, 100)
-    k   = pd.to_numeric(df.get('p_k', 0), errors='coerce').fillna(0)
+    hit    = df['Hit_Score'].clip(0, 100)
+    single = df['Single_Score'].clip(0, 100)
+    xb     = df['XB_Score'].clip(0, 100)
+    hr     = df['HR_Score'].clip(0, 100)
+    k      = pd.to_numeric(df.get('p_k', 0), errors='coerce').fillna(0)
 
-    # K% bonus: how much above league average (more Ks = better under)
-    k_bonus  = ((k - cfg['league_k_avg']) * cfg['under_k_weight']).clip(lower=0)
+    # K% bonus: above-league K% = more strikeouts = better under candidate
+    k_bonus = ((k - cfg['league_k_avg']) * cfg['under_k_weight']).clip(lower=0)
 
-    # Pitcher grade bonus — good pitcher suppresses all contact
+    # Pitcher grade bonus
     def _pgbonus(grade):
         return (cfg['under_pitcher_bonus'] if grade == 'A+' else
                 cfg['under_pitcher_a']     if grade == 'A'  else 0.0)
+    p_bonus = df['pitch_grade'].apply(_pgbonus) \
+              if 'pitch_grade' in df.columns \
+              else pd.Series(0.0, index=df.index)
 
-    if 'pitch_grade' in df.columns:
-        p_bonus = df['pitch_grade'].apply(_pgbonus)
-    else:
-        p_bonus = pd.Series(0.0, index=df.index)
-
-    # ── XB Under Score ────────────────────────────────────────────────────────
-    # Primary: low XB_Score. Secondary: HR must also be low (HR is also multi-base).
-    # Hit_Score plays a smaller role — singles don't cash an XB over.
+    # ── XB Under ─────────────────────────────────────────────────────────────
+    # Doubles/triples kill it. HR is a separate prop. Singles are fine.
+    # Hit_Score plays a minor role — contact volume matters but type matters more.
     df['Under_XB_Score'] = (
-        (100 - xb)  * 0.50
-      + (100 - hr)  * 0.35
+        (100 - xb)  * 0.55
+      + (100 - hr)  * 0.30
       + (100 - hit) * 0.15
       + k_bonus + p_bonus
     ).clip(0, 100).round(1)
 
-    # ── TB Under Score ────────────────────────────────────────────────────────
-    # Total bases — ALL routes to accumulating bases matter.
-    # A player can go 1-for-3 with a single and still cash TB1.5 under,
-    # so Hit_Score carries more weight here than for XB under.
-    df['Under_TB_Score'] = (
-        (100 - hit) * 0.45
-      + (100 - xb)  * 0.35
-      + (100 - hr)  * 0.20
+    # ── TB Under 1.5 ─────────────────────────────────────────────────────────
+    # CORRECT LOGIC: A single = 1 base = CASHES the under. Singles do NOT kill it.
+    # Only XB (2 bases) and HR (4 bases) lose this bet.
+    # Players with high Single_Score but low XB/HR are IDEAL — they make contact
+    # but it stays in the yard and doesn't accumulate multiple bases.
+    # Bonus when Single_Score > XB_Score = true singles profile.
+    single_profile_bonus = ((single - xb) * 0.15).clip(lower=0, upper=5)
+    df['Under_TB15_Score'] = (
+        (100 - xb)  * 0.55
+      + (100 - hr)  * 0.35
+      + single_profile_bonus   # reward true singles hitters
       + k_bonus + p_bonus
     ).clip(0, 100).round(1)
 
-    # ── Hit Under Score ───────────────────────────────────────────────────────
-    # Hardest to cash — any hit type kills it. Hit_Score is overwhelmingly primary.
-    # K% is even more important here since a strikeout = guaranteed 0 hits.
+    # ── TB Under 0.5 ─────────────────────────────────────────────────────────
+    # Need the player to get ZERO total bases. Any hit kills it.
+    # Walks are fine (0 TB). Strikeout = 0 TB = WIN.
+    # All offensive score routes are dangerous here.
+    df['Under_TB05_Score'] = (
+        (100 - hit) * 0.45
+      + (100 - xb)  * 0.30
+      + (100 - hr)  * 0.25
+      + k_bonus * 1.2   # slightly higher K weight — strikeout = guaranteed win
+      + p_bonus
+    ).clip(0, 100).round(1)
+
+    # ── Hit Under (0.5 line, same math as TB 0.5 — different book label) ────
+    # Any base hit kills it. K% is most critical signal.
     df['Under_Hit_Score'] = (
         (100 - hit) * 0.70
       + k_bonus * 1.5
@@ -114,12 +134,21 @@ def compute_under_scores(df: pd.DataFrame) -> pd.DataFrame:
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────
-    df['_disq_xb']  = (hr  > cfg['under_xb_disq_hr'])   | \
-                      (hit > cfg['under_xb_disq_hit'])
-    df['_disq_tb']  = (hit > cfg['under_tb_disq_any'])   | \
-                      (xb  > cfg['under_tb_disq_any'])   | \
-                      (hr  > cfg['under_tb_disq_any'])
-    df['_disq_hit'] = hit > cfg['under_hit_disq_hit']
+    # XB Under: HR or high Hit volume = danger (can still get bases via other routes)
+    df['_disq_xb']   = (hr  > cfg['under_xb_disq_hr']) | \
+                       (hit > cfg['under_xb_disq_hit'])
+
+    # TB 1.5 Under: only XB and HR disqualify (singles are fine for this line)
+    df['_disq_tb15'] = (xb > cfg['under_xb_disq_hr']) | \
+                       (hr > cfg['under_xb_disq_hr'])
+
+    # TB 0.5 Under: any elevated offensive score = danger
+    df['_disq_tb05'] = (hit > cfg['under_tb_disq_any']) | \
+                       (xb  > cfg['under_tb_disq_any']) | \
+                       (hr  > cfg['under_tb_disq_any'])
+
+    # Hit Under: only Hit_Score disqualifies
+    df['_disq_hit']  = hit > cfg['under_hit_disq_hit']
 
     return df
 
@@ -151,7 +180,14 @@ def _disq_reason(row: pd.Series, target: str) -> str:
             reasons.append(f"HR={hr:.0f} (can still go yard)")
         if hit > cfg['under_xb_disq_hit']:
             reasons.append(f"Hit={hit:.0f} (high contact vol)")
-    elif target == 'tb':
+    elif target == 'tb15':
+        xb = float(row.get('XB_Score', 0) or 0)
+        hr = float(row.get('HR_Score', 0) or 0)
+        if xb > cfg['under_xb_disq_hr']:
+            reasons.append(f"XB={xb:.0f} (likely extra bases)")
+        if hr > cfg['under_xb_disq_hr']:
+            reasons.append(f"HR={hr:.0f} (4 bases = loses 1.5)")
+    elif target == 'tb05':
         for sc, lbl in [('Hit_Score','Hit'),('XB_Score','XB'),('HR_Score','HR')]:
             val = float(row.get(sc, 0) or 0)
             if val > cfg['under_tb_disq_any']:
@@ -180,16 +216,27 @@ def build_under_filters(df: pd.DataFrame) -> dict:
     # ── Under type ────────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🎯 Under Type")
     under_map = {
-        "🔻 XB Under — Extra Bases":      "xb",
-        "📊 TB Under — Total Bases":      "tb",
-        "❌ Hit Under — No Hit (0.5 line)":"hit",
+        "🔻 XB Under — No Extra Bases (doubles/triples)":  "xb",
+        "📊 TB Under 1.5 — Under 1.5 Total Bases":         "tb15",
+        "📉 TB Under 0.5 — No Bases At All":               "tb05",
+        "❌ Hit Under — No Hit (0.5 line)":                 "hit",
     }
     u_label            = st.sidebar.selectbox("Choose Under Target", list(under_map.keys()))
     filters['under']   = under_map[u_label]
     filters['under_label'] = u_label
 
-    score_col_map = {'xb': 'Under_XB_Score', 'tb': 'Under_TB_Score', 'hit': 'Under_Hit_Score'}
-    disq_col_map  = {'xb': '_disq_xb',        'tb': '_disq_tb',       'hit': '_disq_hit'}
+    score_col_map = {
+        'xb':   'Under_XB_Score',
+        'tb15': 'Under_TB15_Score',
+        'tb05': 'Under_TB05_Score',
+        'hit':  'Under_Hit_Score',
+    }
+    disq_col_map = {
+        'xb':   '_disq_xb',
+        'tb15': '_disq_tb15',
+        'tb05': '_disq_tb05',
+        'hit':  '_disq_hit',
+    }
     filters['under_score_col'] = score_col_map[filters['under']]
     filters['under_disq_col']  = disq_col_map[filters['under']]
 
@@ -387,18 +434,20 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
 
     # Rename Under_Score for display
     label_map = {
-        'Under_XB_Score':  '🔻 XB Under',
-        'Under_TB_Score':  '📊 TB Under',
-        'Under_Hit_Score': '❌ Hit Under',
+        'Under_XB_Score':   '🔻 XB Under',
+        'Under_TB15_Score': '📊 TB Under 1.5',
+        'Under_TB05_Score': '📉 TB Under 0.5',
+        'Under_Hit_Score':  '❌ Hit Under',
     }
 
     col_order = ['Batter','Team','Pitcher','pitch_grade','Disq',
                  sc,
+                 'prop_tb_line','prop_tb_under_odds','prop_tb_over_odds',
+                 'prop_hr_odds',
                  'Hit_Score','XB_Score','HR_Score',
                  'p_k','p_bb','total_hit_prob','p_1b','p_xb','p_hr',
                  'vs Grade']
 
-    existing = [c for c in col_order if c in disp.columns]
     rename   = {
         sc:            label_map.get(sc, 'Under Score'),
         'pitch_grade': 'P.Grd',
@@ -413,9 +462,34 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         'XB_Score':    '🔥 XB',
         'HR_Score':    '💣 HR',
         'Disq':        'Status',
+        'prop_tb_line':       'TB Line',
+        'prop_tb_under_odds': 'TB Under',
+        'prop_tb_over_odds':  'TB Over',
+        'prop_hr_odds':       'HR Odds',
     }
 
-    out_df = disp[existing].rename(columns=rename)
+    # Add market edge badge column when prop data available
+    has_props = 'prop_tb_under_odds' in disp.columns and \
+                disp['prop_tb_under_odds'].astype(bool).any()
+    if has_props:
+        try:
+            from prop_odds import edge_badge
+            under_score_col = sc
+            disp['Market Edge'] = disp.apply(
+                lambda r: edge_badge(
+                    float(r.get(under_score_col, 0) or 0),
+                    float(r.get('prop_tb_under_pct', 0) or 0)
+                ), axis=1
+            )
+            col_order_extra = ['Market Edge']
+        except Exception:
+            col_order_extra = []
+    else:
+        col_order_extra = []
+
+    existing = [c for c in col_order if c in disp.columns] + \
+               [c for c in col_order_extra if c in disp.columns]
+    out_df   = disp[existing].rename(columns=rename)
 
     fmt = {}
     for cn in out_df.columns:
@@ -460,9 +534,10 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
 
     # Legend
     disq_note = {
-        'xb':  f"Disqualified if HR_Score>{cfg['under_xb_disq_hr']:.0f} or Hit_Score>{cfg['under_xb_disq_hit']:.0f}",
-        'tb':  f"Disqualified if ANY of Hit/XB/HR_Score>{cfg['under_tb_disq_any']:.0f}",
-        'hit': f"Disqualified if Hit_Score>{cfg['under_hit_disq_hit']:.0f}",
+        'xb':   f"Disqualified if HR_Score>{cfg['under_xb_disq_hr']:.0f} or Hit_Score>{cfg['under_xb_disq_hit']:.0f}",
+        'tb15': f"Disqualified if XB_Score>{cfg['under_xb_disq_hr']:.0f} or HR_Score>{cfg['under_xb_disq_hr']:.0f} — singles are FINE for this line",
+        'tb05': f"Disqualified if ANY of Hit/XB/HR_Score>{cfg['under_tb_disq_any']:.0f}",
+        'hit':  f"Disqualified if Hit_Score>{cfg['under_hit_disq_hit']:.0f}",
     }.get(target, "")
 
     st.markdown(
@@ -569,6 +644,28 @@ def under_page(df: pd.DataFrame, filters_base: dict):
         unsafe_allow_html=True
     )
     _render_under_top_cards(slate_excl, filters)
+
+    # ── TB line auto-suggest from prop odds ────────────────────────────────────
+    # If prop data is available, check whether the book's line matches the
+    # user's selected under type — and surface a note if it doesn't.
+    if 'prop_tb_line' in slate_excl.columns:
+        lines_available = slate_excl['prop_tb_line'].dropna()
+        lines_available = lines_available[lines_available.astype(bool)]
+        if not lines_available.empty:
+            line_counts = lines_available.value_counts()
+            top_line    = line_counts.index[0]
+            target      = filters['under']
+            # Suggest switching if the dominant book line doesn't match selection
+            if top_line == '0.5' and target == 'tb15':
+                st.info(
+                    "📊 **Book tip:** Most players today have TB lines at **0.5**. "
+                    "Consider switching to **TB Under 0.5** for this slate."
+                )
+            elif top_line == '1.5' and target == 'tb05':
+                st.info(
+                    "📊 **Book tip:** Most players today have TB lines at **1.5**. "
+                    "Consider switching to **TB Under 1.5** which matches the available market."
+                )
 
     # Results table
     st.markdown("---")

@@ -84,6 +84,19 @@ def _enrich_with_ids(df, player_id_map):
         return df
 
 
+def _enrich_with_prop_odds(df, player_id_map: dict) -> pd.DataFrame:
+    """
+    Fetch today's player prop odds from Tank01 and join to df by MLBAM ID.
+    Adds prop_tb_* and prop_hr_* columns. Fails silently — no odds = no columns.
+    """
+    try:
+        from prop_odds import fetch_player_props, enrich_with_props
+        props = fetch_player_props()          # cached 30 min
+        return enrich_with_props(df, player_id_map, props)
+    except Exception:
+        return df
+
+
 def _merge_signal_metadata(df, order_map: dict, form_map: dict,
                             handedness_map: dict) -> pd.DataFrame:
     """
@@ -181,6 +194,7 @@ def main_page():
         player_id_map = _get_player_id_map(df)
         df = _enrich_with_ids(df, player_id_map)
         df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
+        df = _enrich_with_prop_odds(df, player_id_map)   # Tank01 odds join
 
     # ── Apply confirmed lineup filter if toggled ──────────────────────────────
     # Uses get_confirmed_game_abbrs() which derives confirmation from
@@ -320,6 +334,7 @@ def main():
                 player_id_map = _get_player_id_map(df)
                 df = _enrich_with_ids(df, player_id_map)
                 df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
+                df = _enrich_with_prop_odds(df, player_id_map)   # Tank01 odds join
             filters = {'use_gc':True,'use_park':True,
                        'score_col':'Hit_Score','score_col_base':'Hit_Score'}
             player_profile_page(df, player_id_map, filters,
@@ -338,6 +353,9 @@ def main():
                                       use_park=True, use_gc=True,
                                       order_map=order_map, form_map=form_map,
                                       handedness_map=handedness_map)
+                player_id_map = _get_player_id_map(df)
+                df = _enrich_with_ids(df, player_id_map)
+                df = _enrich_with_prop_odds(df, player_id_map)   # Tank01 odds join
             under_page(df, filters_base={})
 
     elif page == "⚡ Parlay Builder":

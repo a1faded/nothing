@@ -511,6 +511,17 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     if has_form and 'Form' in disp.columns:
         cols['Form'] = 'Form'
 
+    # ── Prop odds columns ──────────────────────────────────────────────────────
+    # TB line + under odds on every target (quick reference for any under prop)
+    # HR odds only when the active target is HR (over side context)
+    has_props = 'prop_tb_line' in disp.columns and disp['prop_tb_line'].astype(bool).any()
+    if has_props:
+        cols['prop_tb_line']       = 'TB Line'
+        cols['prop_tb_under_odds'] = 'TB Under'
+        cols['prop_tb_over_odds']  = 'TB Over'
+        if sc_base == 'HR_Score':
+            cols['prop_hr_odds'] = 'HR Odds'
+
     statcast_cols = {'Barrel%':'Barrel%','HH%':'HH%','xBA':'xBA',
                      'xSLG':'xSLG','AvgEV':'AvgEV','maxEV':'maxEV'}
     has_statcast  = any(c in disp.columns and disp[c].notna().any() for c in statcast_cols)

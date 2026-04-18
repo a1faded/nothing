@@ -60,7 +60,44 @@ def _score_tier(score: float) -> tuple[str, str]:
     return             "WEAK",     "#f87171"
 
 
-def _profile_badge(row: pd.Series, target_sc: str) -> str:
+def _eligible_for_target(df: pd.DataFrame, sc: str) -> pd.DataFrame:
+    """
+    Hard profile filter — removes players whose score is higher in a
+    more powerful category than the target category.
+
+    Rule: if a player fits a stronger profile better, they should never
+    be the #1 recommendation for a weaker profile prop.
+
+    Single:  exclude if XB_Score > Single_Score  (XB profile, will go for extra bases)
+             exclude if HR_Score > Single_Score  (power profile, even further mismatch)
+    XB:      exclude if HR_Score > XB_Score      (HR profile, may clear the fence)
+    Hit:     no exclusions — any contact type contributes
+    HR:      no exclusions — HR profile is the target
+
+    Scores remain unchanged in the results table so users can still see
+    the full picture. This only affects who qualifies as #1 for each target.
+
+    Falls back to the full df if filtering leaves it empty (e.g. very small slate).
+    """
+    sc_base = sc.replace('_gc', '')
+
+    if sc_base == 'Single_Score':
+        mask = pd.Series(True, index=df.index)
+        if 'XB_Score' in df.columns:
+            mask &= ~(df['XB_Score'] > df['Single_Score'])
+        if 'HR_Score' in df.columns:
+            mask &= ~(df['HR_Score'] > df['Single_Score'])
+        filtered = df[mask]
+        return filtered if not filtered.empty else df
+
+    if sc_base == 'XB_Score':
+        mask = pd.Series(True, index=df.index)
+        if 'HR_Score' in df.columns:
+            mask &= ~(df['HR_Score'] > df['XB_Score'])
+        filtered = df[mask]
+        return filtered if not filtered.empty else df
+
+    return df
     """
     Returns an HTML warning badge when the player's contact profile is a
     mismatch for the target bet type.
@@ -229,9 +266,10 @@ def render_score_summary_cards(slate_df: pd.DataFrame, filters: dict):
     for sc, css, icon, short, desc in defs:
         if sc not in slate_df.columns:
             continue
-        rank_sc  = (sc + '_gc') if (use_gc and sc + '_gc' in slate_df.columns) else sc
-        row      = slate_df.loc[slate_df[rank_sc].idxmax()]
-        disp_val = float(row[rank_sc])
+        rank_sc   = (sc + '_gc') if (use_gc and sc + '_gc' in slate_df.columns) else sc
+        eligible  = _eligible_for_target(slate_df, sc)
+        row       = eligible.loc[eligible[rank_sc].idxmax()]
+        disp_val  = float(row[rank_sc])
         base_col = sc + '_base'
         gc_str   = " ⛅" if use_gc and rank_sc != sc else ""
 
@@ -691,7 +729,8 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
             if sc not in slate_df.columns:
                 continue
             rank_sc  = (sc + '_gc') if (use_gc and sc + '_gc' in slate_df.columns) else sc
-            row      = slate_df.loc[slate_df[rank_sc].idxmax()]
+            eligible = _eligible_for_target(slate_df, sc)
+            row      = eligible.loc[eligible[rank_sc].idxmax()]
             disp_val = float(row[rank_sc])
             base_col = sc + '_base'
 

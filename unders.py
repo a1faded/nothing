@@ -871,7 +871,10 @@ def under_page(df: pd.DataFrame, filters_base: dict):
         st.error("❌ No slate data loaded.")
         return
 
-    # Compute under scores — pass form_map for XB rate signal, use_gc from filters
+    # Build sidebar filters FIRST — use_gc must be known before scoring
+    filters = build_under_filters(df)
+
+    # Now compute under scores with the correct use_gc from filters
     try:
         from mlb_api import get_recent_batting_form as _get_form
         _form = _get_form(days=7)
@@ -879,9 +882,6 @@ def under_page(df: pd.DataFrame, filters_base: dict):
         _form = {}
     df = compute_under_scores(df, form_map=_form,
                               use_gc=filters.get('use_gc', True))
-
-    # Build under-specific sidebar filters
-    filters = build_under_filters(df)
 
     # Apply confirmed lineup filter (same logic as main page)
     if filters.get('confirmed_only'):

@@ -124,6 +124,21 @@ CONFIG = {
     'under_parkxb_weight':  0.5,   # pts per xb_boost unit
     'under_parkxb_max':     2.0,   # cap —only a small modifier
 
+    # Game conditions suppression signal (Layer 9 in compute_under_scores)
+    # GC columns tell us whether today's game environment favors pitchers/unders.
+    # Low gc_hits20 = fewer hits expected = under signal for all types
+    # Low gc_runs10 = low-scoring game = under signal
+    # High gc_k20   = high strikeout game = amplifies K signal
+    # High gc_qs    = pitcher likely to go deep = sustained suppression
+    # Low gc_hr4    = few HRs expected = XB/HR under signal
+    # Applied as a single gc_suppression term, ±6 pts, all under types.
+    'under_gc_hits_weight':  0.12,  # per % below median gc_hits20 (18.6)
+    'under_gc_runs_weight':  0.10,  # per % below median gc_runs10 (28.4)
+    'under_gc_k_weight':     0.10,  # per % above median gc_k20 (23.3)
+    'under_gc_qs_weight':    0.08,  # per % above median gc_qs (21.5)
+    'under_gc_hr_weight':    0.14,  # per % below median gc_hr4 (12.2) — XB/HR unders
+    'under_gc_max':          6.0,   # cap ±6 pts total GC suppression signal
+
     # ── Hot park extra boost (gc_hr4 > 2× median = 24.4%) ────────────────────
     # Applied as flat +pts to HR_Score_gc for ALL batters in that game.
     # Rewards entire lineups in genuinely HR-friendly park/game environments.

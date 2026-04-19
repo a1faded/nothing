@@ -45,12 +45,13 @@ from helpers import grade_pill, style_grade_cell
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_under_scores(df: pd.DataFrame,
-                         form_map: dict | None = None) -> pd.DataFrame:
+                         form_map: dict | None = None,
+                         use_gc:   bool = True) -> pd.DataFrame:
     """
-    Full 8-layer under score computation. Vectorized throughout.
+    Full 8+1 layer under score computation. Vectorized throughout.
 
     Signal architecture:
-      Layer 1 — Primary offensive scores (inverted BallPark Pal scores)
+      Layer 1 — Primary offensive scores, GC-adjusted when use_gc=True (Fix 1)
       Layer 2 — K% and BB% (non-contact plate appearance outcomes)
       Layer 3 — Pitcher grade
       Layer 4 — Historical matchup AVG/PA (BallPark Pal)
@@ -58,16 +59,20 @@ def compute_under_scores(df: pd.DataFrame,
       Layer 6 — Recent hit rate (7-day H/G — cold hitter signal for Hit Under)
       Layer 7 — Statcast contact quality (Barrel%, HH%, AvgEV, xSLG, xBA, xwOBA)
       Layer 8 — vs Grade + park factor (matchup context)
+      Layer 9 — Game conditions suppression (Fix 2) — pitcher/game environment today
 
-    All Statcast signals default to 0.0 when NaN (Option A — neutral, not penalty).
-    All form_map signals default to 0.0 when player not in map or <3 games.
-    All historical signals default to 0.0 when PA < under_hist_min_pa.
+    Fix 1: When use_gc=True, use Hit_Score_gc/XB_Score_gc/HR_Score_gc as the
+           primary Layer 1 inputs. These already encode park, weather, and game
+           environment from compute_game_condition_scores(). Falls back to base
+           scores if GC variants not in df.
 
-    Per-type signal relevance:
-      XB Under:   Layers 1(XB+HR) 2 3 4 5 7(Barrel%,HH%,AvgEV,xSLG) 8
-      TB 1.5:     Layers 1(XB+HR) 2 3 4 5 7(xSLG) 8
-      TB 0.5:     Layers 1(all)   2 3 4 6 7(xBA,xwOBA) 8
-      Hit Under:  Layers 1(Hit)   2 3 4 6 7(xBA,xwOBA) 8
+    Fix 2: Layer 9 adds a direct gc_suppression bonus from today's GC data:
+           low gc_hits20 + low gc_runs10 + high gc_k20 + high gc_qs = pitcher day.
+           For XB/HR unders: also factors in low gc_hr4.
+           Applied to all four under types, ±6 pts max.
+
+    All Statcast signals neutral (0.0) when NaN. All form signals neutral when
+    player not in map or <3 games. Hist signal neutral when PA < under_hist_min_pa.
     """
     df       = df.copy()
     cfg      = CONFIG
@@ -77,13 +82,24 @@ def compute_under_scores(df: pd.DataFrame,
         if col not in df.columns:
             df[col] = 50.0
 
-    # ── Primary score series ──────────────────────────────────────────────────
-    hit    = df['Hit_Score'].clip(0, 100)
-    single = df['Single_Score'].clip(0, 100)
-    xb     = df['XB_Score'].clip(0, 100)
-    hr     = df['HR_Score'].clip(0, 100)
+    # ── FIX 1: Use GC-adjusted scores as Layer 1 primary ─────────────────────
+    # GC scores incorporate park, weather, game total, and pitcher environment.
+    # Inverting GC scores gives a more accurate "how bad is this matchup today"
+    # signal than inverting base scores. Falls back gracefully when not available.
+    def _gc_or_base(gc_col: str, base_col: str) -> pd.Series:
+        if use_gc and gc_col in df.columns:
+            return pd.to_numeric(df[gc_col], errors='coerce').fillna(
+                pd.to_numeric(df[base_col], errors='coerce').fillna(50.0)
+            ).clip(0, 100)
+        return df[base_col].clip(0, 100)
 
-    # ── Raw probability columns (BallPark Pal) ────────────────────────────────
+    hit    = _gc_or_base('Hit_Score_gc',    'Hit_Score')
+    xb     = _gc_or_base('XB_Score_gc',     'XB_Score')
+    hr     = _gc_or_base('HR_Score_gc',     'HR_Score')
+    # Single stays as base — no GC variant changes its meaning for unders
+    single = df['Single_Score'].clip(0, 100)
+
+    # ── Raw probability columns ───────────────────────────────────────────────
     k  = pd.to_numeric(df.get('p_k',  0), errors='coerce').fillna(0)
     bb = pd.to_numeric(df.get('p_bb', 0), errors='coerce').fillna(0)
 
@@ -145,8 +161,7 @@ def compute_under_scores(df: pd.DataFrame,
     xb_rate_adj = df['Batter'].apply(_xb_rate_sig)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # LAYER 6 — Recent hit rate (7-day H/G) — cold hitter signal
-    # Applied to Hit Under and TB 0.5 — not XB/TB15 (singles are neutral there)
+    # LAYER 6 — Recent hit rate (7-day H/G)
     # ─────────────────────────────────────────────────────────────────────────
     hit_rate_lg  = cfg['under_hit_rate_lg_avg']
     hit_rate_w   = cfg['under_hit_rate_weight']
@@ -163,21 +178,20 @@ def compute_under_scores(df: pd.DataFrame,
     hit_rate_adj = df['Batter'].apply(_hit_rate_sig)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # LAYER 7 — Statcast contact quality (all neutral when NaN)
+    # LAYER 7 — Statcast contact quality
     # ─────────────────────────────────────────────────────────────────────────
     def _sc(col: str, lg_val: float) -> pd.Series:
-        """Return Statcast column as Series, filling NaN with league average (neutral)."""
         if col not in df.columns:
             return pd.Series(lg_val, index=df.index)
         return pd.to_numeric(df[col], errors='coerce').fillna(lg_val)
 
-    # XB / power signals
-    barrel = _sc('Barrel%', cfg['league_barrel_pct'])   # lg ~7.5%
-    hh     = _sc('HH%',     cfg['league_hh_pct'])       # lg ~38.0%
-    avgev  = _sc('AvgEV',   cfg['league_avgev'])         # lg ~88.5 mph
-    xslg   = _sc('xSLG',    cfg['league_xslg'])          # lg ~0.400
+    barrel = _sc('Barrel%', cfg['league_barrel_pct'])
+    hh     = _sc('HH%',     cfg['league_hh_pct'])
+    avgev  = _sc('AvgEV',   cfg['league_avgev'])
+    xslg   = _sc('xSLG',    cfg['league_xslg'])
+    xba    = _sc('xBA',     cfg['league_xba'])
+    xwoba  = _sc('xwOBA',   cfg['league_xwoba'])
 
-    # (lg - player) → positive when player is below league avg = good for under
     barrel_adj = ((cfg['league_barrel_pct'] - barrel) * cfg['under_barrel_weight']
                   ).clip(-cfg['under_barrel_max'], cfg['under_barrel_max'])
     hh_adj     = ((cfg['league_hh_pct'] - hh) * cfg['under_hh_weight']
@@ -186,131 +200,123 @@ def compute_under_scores(df: pd.DataFrame,
                   ).clip(-cfg['under_avgev_max'], cfg['under_avgev_max'])
     xslg_adj   = ((cfg['league_xslg'] - xslg) * cfg['under_xslg_weight']
                   ).clip(-cfg['under_xslg_max'], cfg['under_xslg_max'])
-
-    # Contact quality signals (hit probability predictors)
-    xba   = _sc('xBA',   cfg['league_xba'])    # lg ~0.248
-    xwoba = _sc('xwOBA', cfg['league_xwoba'])  # lg ~0.320
-
-    xba_adj   = ((cfg['league_xba']   - xba)   * cfg['under_xba_weight']
-                 ).clip(-cfg['under_xba_max'], cfg['under_xba_max'])
-    xwoba_adj = ((cfg['league_xwoba'] - xwoba) * cfg['under_xwoba_weight']
-                 ).clip(-cfg['under_xwoba_max'], cfg['under_xwoba_max'])
+    xba_adj    = ((cfg['league_xba']   - xba)   * cfg['under_xba_weight']
+                  ).clip(-cfg['under_xba_max'], cfg['under_xba_max'])
+    xwoba_adj  = ((cfg['league_xwoba'] - xwoba) * cfg['under_xwoba_weight']
+                  ).clip(-cfg['under_xwoba_max'], cfg['under_xwoba_max'])
 
     # ─────────────────────────────────────────────────────────────────────────
     # LAYER 8 — vs Grade + park XB factor
     # ─────────────────────────────────────────────────────────────────────────
-    # vs Grade: negative grade means pitcher dominates this matchup historically
-    # Clip at 0 on both sides — we want the signal to fire for weak matchups only
-    vs_grade = pd.to_numeric(df.get('vs Grade', 0), errors='coerce').fillna(0)
-    # Negative grade = bonus (pitcher wins this matchup)
-    # Positive grade = neutral (good matchup for batter — already penalised by scores)
+    vs_grade   = pd.to_numeric(df.get('vs Grade', 0), errors='coerce').fillna(0)
     vsgrade_adj = ((-vs_grade).clip(lower=0) * cfg['under_vsgrade_weight']
                    ).clip(0, cfg['under_vsgrade_max'])
 
-    # Park XB factor: high xb_boost = park amplifies XB opportunities = penalty for XB unders
-    xb_boost = pd.to_numeric(df.get('xb_boost', 0), errors='coerce').fillna(0)
+    xb_boost  = pd.to_numeric(df.get('xb_boost', 0), errors='coerce').fillna(0)
     parkxb_pen = (xb_boost * cfg['under_parkxb_weight']
                   ).clip(0, cfg['under_parkxb_max'])
 
     # ─────────────────────────────────────────────────────────────────────────
-    # FINAL SCORES — all layers combined
+    # LAYER 9 — FIX 2: Game conditions suppression signal
+    # ─────────────────────────────────────────────────────────────────────────
+    # Computes a per-row GC suppression bonus based on today's game environment.
+    # Positive = pitcher-friendly conditions = good for unders.
+    # Negative = hitter-friendly conditions = bad for unders.
+    # Only fires when GC columns are present; gracefully returns 0 otherwise.
+    gc_max = cfg['under_gc_max']
+
+    _GC_COLS = ['gc_hits20','gc_runs10','gc_k20','gc_qs','gc_hr4']
+    has_gc_data = use_gc and all(c in df.columns for c in _GC_COLS)
+
+    if has_gc_data:
+        gc_hits = pd.to_numeric(df['gc_hits20'], errors='coerce').fillna(cfg['gc_hits20_anchor'])
+        gc_runs = pd.to_numeric(df['gc_runs10'], errors='coerce').fillna(cfg['gc_runs10_anchor'])
+        gc_k    = pd.to_numeric(df['gc_k20'],    errors='coerce').fillna(cfg['gc_k20_anchor'])
+        gc_qs   = pd.to_numeric(df['gc_qs'],     errors='coerce').fillna(cfg['gc_qs_anchor'])
+        gc_hr4  = pd.to_numeric(df['gc_hr4'],    errors='coerce').fillna(cfg['gc_hr4_anchor'])
+
+        # Below-median signals: positive = suppression = good for unders
+        hits_sig = (cfg['gc_hits20_anchor'] - gc_hits) * cfg['under_gc_hits_weight']
+        runs_sig = (cfg['gc_runs10_anchor'] - gc_runs) * cfg['under_gc_runs_weight']
+        # Above-median signals: positive = more Ks/QS = good for unders
+        k_sig    = (gc_k  - cfg['gc_k20_anchor']) * cfg['under_gc_k_weight']
+        qs_sig   = (gc_qs - cfg['gc_qs_anchor'])  * cfg['under_gc_qs_weight']
+        # Low HR environment: good for XB/HR unders specifically
+        hr_sig   = (cfg['gc_hr4_anchor'] - gc_hr4) * cfg['under_gc_hr_weight']
+
+        # General suppression: all hit/run/K/QS signals combined
+        gc_general    = (hits_sig + runs_sig + k_sig + qs_sig).clip(-gc_max, gc_max)
+        # Power suppression: adds HR environment for XB/HR under types
+        gc_power_supp = (hits_sig + runs_sig + k_sig + qs_sig + hr_sig).clip(-gc_max, gc_max)
+    else:
+        gc_general    = pd.Series(0.0, index=df.index)
+        gc_power_supp = pd.Series(0.0, index=df.index)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FINAL SCORES — all 9 layers
     # ─────────────────────────────────────────────────────────────────────────
 
     # ── XB Under ─────────────────────────────────────────────────────────────
-    # Doubles/triples kill it. Singles fine. HR separate prop.
-    # Heaviest Statcast load: Barrel%, HH%, AvgEV, xSLG all apply.
     df['Under_XB_Score'] = (
-        # Layer 1 — primary
-        (100 - xb)  * 0.42
-      + (100 - hr)  * 0.22
-      + (100 - hit) * 0.08
-        # Layer 2 — non-contact outcomes
-      + k_bonus + bb_xb
-        # Layer 3 — pitcher
-      + p_bonus
-        # Layer 4 — historical avg
-      + hist_xb
-        # Layer 5 — recent XB tendency
-      + xb_rate_adj
-        # Layer 7 — Statcast power signals
-      + barrel_adj           # strongest predictor of XBs
-      + hh_adj               # hard contact → XBs
-      + avgev_adj            # exit velocity → XBs
-      + xslg_adj             # expected slugging
-        # Layer 8 — context
-      + vsgrade_adj
-      - parkxb_pen           # high park factor = more XB opportunities = penalty
+        (100 - xb)  * 0.42      # L1 (GC-adjusted when use_gc=True)
+      + (100 - hr)  * 0.22      # L1
+      + (100 - hit) * 0.08      # L1
+      + k_bonus + bb_xb         # L2
+      + p_bonus                  # L3
+      + hist_xb                  # L4
+      + xb_rate_adj              # L5
+      + barrel_adj               # L7 — strongest XB predictor
+      + hh_adj                   # L7
+      + avgev_adj                # L7
+      + xslg_adj                 # L7
+      + vsgrade_adj              # L8
+      - parkxb_pen               # L8
+      + gc_power_supp            # L9 — GC suppression incl. HR environment
     ).clip(0, 100).round(1)
 
     # ── TB Under 1.5 ─────────────────────────────────────────────────────────
-    # Only XB and HR kill it. Singles CASH. Singles profile is a positive signal.
-    # Statcast: xSLG most relevant (overall extra-base tendency)
     single_profile_bonus = ((single - xb) * 0.15).clip(lower=0, upper=5)
     df['Under_TB15_Score'] = (
-        # Layer 1
-        (100 - xb)  * 0.45
-      + (100 - hr)  * 0.28
+        (100 - xb)  * 0.45      # L1
+      + (100 - hr)  * 0.28      # L1
       + single_profile_bonus
-        # Layer 2
-      + k_bonus + bb_tb15
-        # Layer 3
-      + p_bonus
-        # Layer 4
-      + hist_tb15
-        # Layer 5 — XB rate still matters (doubles kill this line)
-      + xb_rate_adj * 0.7
-        # Layer 7 — xSLG only (overall power tendency, not granular contact quality)
-      + xslg_adj * 0.8
-      + barrel_adj * 0.5    # lighter — single XB counts here so barrel isn't all-bad
-        # Layer 8
-      + vsgrade_adj
-      - parkxb_pen * 0.5
+      + k_bonus + bb_tb15       # L2
+      + p_bonus                  # L3
+      + hist_tb15                # L4
+      + xb_rate_adj * 0.7       # L5
+      + xslg_adj * 0.8          # L7
+      + barrel_adj * 0.5        # L7
+      + vsgrade_adj              # L8
+      - parkxb_pen * 0.5        # L8
+      + gc_power_supp * 0.8     # L9
     ).clip(0, 100).round(1)
 
     # ── TB Under 0.5 ─────────────────────────────────────────────────────────
-    # Zero bases needed. Any hit kills it. Walks and Ks are wins.
-    # All offensive score routes dangerous. xBA and xwOBA most relevant Statcast.
     df['Under_TB05_Score'] = (
-        # Layer 1
-        (100 - hit) * 0.40
-      + (100 - xb)  * 0.28
-      + (100 - hr)  * 0.22
-        # Layer 2 — K and BB especially important here
-      + k_bonus * 1.2
-      + bb_tb05
-        # Layer 3
-      + p_bonus
-        # Layer 4
-      + hist_tb05
-        # Layer 6 — recent hit rate (cold hitters)
-      + hit_rate_adj
-        # Layer 7 — contact quality (how likely is contact to become a hit)
-      + xba_adj   * 0.7
-      + xwoba_adj * 0.5
-        # Layer 8
-      + vsgrade_adj
+        (100 - hit) * 0.40      # L1
+      + (100 - xb)  * 0.28      # L1
+      + (100 - hr)  * 0.22      # L1
+      + k_bonus * 1.2 + bb_tb05 # L2
+      + p_bonus                  # L3
+      + hist_tb05                # L4
+      + hit_rate_adj             # L6
+      + xba_adj   * 0.7         # L7
+      + xwoba_adj * 0.5         # L7
+      + vsgrade_adj              # L8
+      + gc_general               # L9 — general suppression (no HR component)
     ).clip(0, 100).round(1)
 
     # ── Hit Under ─────────────────────────────────────────────────────────────
-    # Any base hit kills it. Highest variance prop — needs strongest convergence.
-    # xBA is the single best predictor — it measures contact quality → hit probability.
     df['Under_Hit_Score'] = (
-        # Layer 1
-        (100 - hit) * 0.45
-        # Layer 2 — K critical: strikeout = guaranteed no hit
-      + k_bonus * 1.8
-      + bb_hit
-        # Layer 3
-      + p_bonus
-        # Layer 4 — historical AVG most directly relevant prop
-      + hist_hit
-        # Layer 6 — cold hitters
-      + hit_rate_adj * 1.2
-        # Layer 7 — contact quality most important here
-      + xba_adj             # below-avg xBA = contact doesn't become hits
-      + xwoba_adj * 0.7     # overall offensive quality
-        # Layer 8
-      + vsgrade_adj * 1.2   # weak matchup matters most for no-hit prop
+        (100 - hit) * 0.45      # L1
+      + k_bonus * 1.8 + bb_hit  # L2
+      + p_bonus                  # L3
+      + hist_hit                 # L4
+      + hit_rate_adj * 1.2      # L6
+      + xba_adj                  # L7 — strongest hit predictor
+      + xwoba_adj * 0.7         # L7
+      + vsgrade_adj * 1.2       # L8
+      + gc_general * 1.1        # L9 — slightly higher for hit under
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────
@@ -865,13 +871,14 @@ def under_page(df: pd.DataFrame, filters_base: dict):
         st.error("❌ No slate data loaded.")
         return
 
-    # Compute under scores — pass form_map for XB rate signal
+    # Compute under scores — pass form_map for XB rate signal, use_gc from filters
     try:
         from mlb_api import get_recent_batting_form as _get_form
         _form = _get_form(days=7)
     except Exception:
         _form = {}
-    df = compute_under_scores(df, form_map=_form)
+    df = compute_under_scores(df, form_map=_form,
+                              use_gc=filters.get('use_gc', True))
 
     # Build under-specific sidebar filters
     filters = build_under_filters(df)

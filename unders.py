@@ -235,22 +235,56 @@ def compute_under_scores(df: pd.DataFrame,
         gc_qs   = pd.to_numeric(df['gc_qs'],     errors='coerce').fillna(cfg['gc_qs_anchor'])
         gc_hr4  = pd.to_numeric(df['gc_hr4'],    errors='coerce').fillna(cfg['gc_hr4_anchor'])
 
-        # Below-median signals: positive = suppression = good for unders
         hits_sig = (cfg['gc_hits20_anchor'] - gc_hits) * cfg['under_gc_hits_weight']
         runs_sig = (cfg['gc_runs10_anchor'] - gc_runs) * cfg['under_gc_runs_weight']
-        # Above-median signals: positive = more Ks/QS = good for unders
         k_sig    = (gc_k  - cfg['gc_k20_anchor']) * cfg['under_gc_k_weight']
         qs_sig   = (gc_qs - cfg['gc_qs_anchor'])  * cfg['under_gc_qs_weight']
-        # Low HR environment: good for XB/HR unders specifically
         hr_sig   = (cfg['gc_hr4_anchor'] - gc_hr4) * cfg['under_gc_hr_weight']
 
-        # General suppression: all hit/run/K/QS signals combined
         gc_general    = (hits_sig + runs_sig + k_sig + qs_sig).clip(-gc_max, gc_max)
-        # Power suppression: adds HR environment for XB/HR under types
         gc_power_supp = (hits_sig + runs_sig + k_sig + qs_sig + hr_sig).clip(-gc_max, gc_max)
     else:
         gc_general    = pd.Series(0.0, index=df.index)
         gc_power_supp = pd.Series(0.0, index=df.index)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 10 — Batting order position
+    # ─────────────────────────────────────────────────────────────────────────
+    # Late-order batters (8-9) get fewer quality at-bats, face fresh pitchers
+    # more often, and are typically weaker offensive players.
+    # → Small bonus for under targets (they're less likely to accumulate bases).
+    # Cleanup hitters (3-5) see the most pitches with runners on, pitchers work
+    # carefully, more walks — neutral to slight penalty for under targets.
+    # Applied uniformly to all under types, small cap (±2 pts max).
+    order_adj = pd.Series(0.0, index=df.index)
+    if '_order_pos' in df.columns:
+        pos = pd.to_numeric(df['_order_pos'], errors='coerce')
+        # Slots 8-9: typically weakest bats → under bonus
+        order_adj = order_adj.where(~(pos.isin([8, 9])), order_adj + 1.5)
+        # Slots 1-2: table-setters, high OBP, walk-prone → mild under bonus
+        order_adj = order_adj.where(~(pos.isin([1, 2])), order_adj + 0.5)
+        # Slots 3-5: cleanup, most dangerous offensive spots → slight under penalty
+        order_adj = order_adj.where(~(pos.isin([3, 4, 5])), order_adj - 1.0)
+        order_adj = order_adj.clip(-2.0, 2.0)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 11 — Platoon split
+    # ─────────────────────────────────────────────────────────────────────────
+    # Same-hand matchups (RHB vs RHP or LHB vs LHP) suppress batting averages
+    # historically. Opposite hand = platoon advantage = batter sees ball better.
+    # For unders: same-hand = bonus (batter disadvantaged = fewer hits/XBs).
+    # Only fires when both pitcher hand and batter hand are known.
+    # Batter hand data wires in when MLB roster lookup activates.
+    # Conservative: pitcher hand is known (from mlb_api), batter hand not yet
+    # programmatically fetched — so we apply a mild pitcher-hand-only signal:
+    # LHP facing the lineup = generally favorable for under (LHPs suppress AVG
+    # across the slate because most batters are RHH and see fewer LHPs).
+    platoon_adj = pd.Series(0.0, index=df.index)
+    if '_pitcher_hand' in df.columns:
+        # LHP bonus: league-wide RHH AVG vs LHP is ~.010 below vs RHP
+        lhp_mask     = df['_pitcher_hand'] == 'L'
+        platoon_adj  = platoon_adj.where(~lhp_mask, platoon_adj + 0.8)
+        platoon_adj  = platoon_adj.clip(-1.5, 1.5)
 
     # ─────────────────────────────────────────────────────────────────────────
     # FINAL SCORES — all 9 layers
@@ -258,20 +292,22 @@ def compute_under_scores(df: pd.DataFrame,
 
     # ── XB Under ─────────────────────────────────────────────────────────────
     df['Under_XB_Score'] = (
-        (100 - xb)  * 0.42      # L1 (GC-adjusted when use_gc=True)
+        (100 - xb)  * 0.42      # L1
       + (100 - hr)  * 0.22      # L1
       + (100 - hit) * 0.08      # L1
       + k_bonus + bb_xb         # L2
       + p_bonus                  # L3
       + hist_xb                  # L4
       + xb_rate_adj              # L5
-      + barrel_adj               # L7 — strongest XB predictor
+      + barrel_adj               # L7
       + hh_adj                   # L7
       + avgev_adj                # L7
       + xslg_adj                 # L7
       + vsgrade_adj              # L8
       - parkxb_pen               # L8
-      + gc_power_supp            # L9 — GC suppression incl. HR environment
+      + gc_power_supp            # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── TB Under 1.5 ─────────────────────────────────────────────────────────
@@ -289,6 +325,8 @@ def compute_under_scores(df: pd.DataFrame,
       + vsgrade_adj              # L8
       - parkxb_pen * 0.5        # L8
       + gc_power_supp * 0.8     # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── TB Under 0.5 ─────────────────────────────────────────────────────────
@@ -303,7 +341,9 @@ def compute_under_scores(df: pd.DataFrame,
       + xba_adj   * 0.7         # L7
       + xwoba_adj * 0.5         # L7
       + vsgrade_adj              # L8
-      + gc_general               # L9 — general suppression (no HR component)
+      + gc_general               # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── Hit Under ─────────────────────────────────────────────────────────────
@@ -313,10 +353,12 @@ def compute_under_scores(df: pd.DataFrame,
       + p_bonus                  # L3
       + hist_hit                 # L4
       + hit_rate_adj * 1.2      # L6
-      + xba_adj                  # L7 — strongest hit predictor
+      + xba_adj                  # L7
       + xwoba_adj * 0.7         # L7
       + vsgrade_adj * 1.2       # L8
-      + gc_general * 1.1        # L9 — slightly higher for hit under
+      + gc_general * 1.1        # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────
@@ -648,7 +690,7 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
 
     rename   = {
         sc:            label_map.get(sc, 'Under Score'),
-        'pitch_grade': 'P.Grd',
+        'pitch_grade': 'P.Grd ↑',    # ↑ = higher grade = better for under
         'p_k':         'K%',
         'p_bb':        'BB%',
         'total_hit_prob':'Hit%',
@@ -711,7 +753,7 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         out_df.insert(insert_at, 'Tier', tier_vals)
 
     _text_cols = {'Tier', 'Status', 'Market Edge', 'TB Line', 'TB Under',
-                  'TB Over', 'HR Odds', 'P.Grd', 'Batter', 'Team', 'Pitcher'}
+                  'TB Over', 'HR Odds', 'P.Grd', 'P.Grd ↑', 'Batter', 'Team', 'Pitcher'}
 
     fmt = {}
     for cn in out_df.columns:
@@ -782,6 +824,13 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
                                           help="✅ = clean candidate · ⚠️ = disqualified (offsetting high score)")
         col_cfg['Tier']   = CC.TextColumn("Tier", width="small",
                                           help="Under Score tier: ELITE ≥75 · STRONG ≥60 · GOOD ≥45")
+        if 'P.Grd ↑' in out_df.columns or 'P.Grd' in out_df.columns:
+            pgrd_col = 'P.Grd ↑' if 'P.Grd ↑' in out_df.columns else 'P.Grd'
+            col_cfg[pgrd_col] = CC.TextColumn(
+                pgrd_col, width="small",
+                help="Pitcher grade. A+/A = GOOD for unders (elite pitchers suppress hits). "
+                     "D/C = BAD for unders (weak pitchers give up bases freely)."
+            )
         if under_label in out_df.columns:
             col_cfg[under_label] = CC.NumberColumn(
                 under_label, format="%.1f", min_value=0, max_value=100,
@@ -939,6 +988,50 @@ def under_page(df: pd.DataFrame, filters_base: dict):
         unsafe_allow_html=True
     )
     _render_under_top_cards(slate_excl, filters)
+
+    # ── Game Conditions Panel ─────────────────────────────────────────────────
+    # Show today's game-level environment so users can see whether GC data
+    # supports or conflicts with their under target.
+    # Inverted from main predictor: LOW hits/runs/HR = ✅ for unders.
+    # HIGH K% / QS% = ✅ for unders.
+    _GC_DISPLAY = ['gc_hits20','gc_runs10','gc_k20','gc_qs','gc_hr4']
+    if all(c in slate_excl.columns for c in _GC_DISPLAY):
+        with st.expander("🌦️ Game Conditions — Under Context", expanded=False):
+            st.markdown(
+                '<div style="font-size:.74rem;color:#64748b;margin-bottom:.5rem">'
+                '✅ = favors unders &nbsp;·&nbsp; ⚠️ = favors overs &nbsp;·&nbsp; '
+                'Anchors: Hits 18.6% · Runs 28.4% · Ks 23.3% · QS 21.5% · HR 12.2%'
+                '</div>',
+                unsafe_allow_html=True
+            )
+            # Build one row per unique game
+            game_rows = (slate_excl[['Game'] + _GC_DISPLAY]
+                         .drop_duplicates(subset='Game')
+                         .sort_values('Game'))
+            cfg = CONFIG
+            display_rows = []
+            for _, row in game_rows.iterrows():
+                def _flag_under(val, anchor, lower_good: bool) -> str:
+                    """✅ when favorable for unders, ⚠️ when harmful."""
+                    return "✅" if (val < anchor if lower_good else val > anchor) else "⚠️"
+                display_rows.append({
+                    'Game':       row['Game'],
+                    '20+Hits %':  f"{_flag_under(row['gc_hits20'], cfg['gc_hits20_anchor'], True)}"
+                                  f" {row['gc_hits20']:.1f}%",
+                    '10+Runs %':  f"{_flag_under(row['gc_runs10'], cfg['gc_runs10_anchor'], True)}"
+                                  f" {row['gc_runs10']:.1f}%",
+                    '20+Ks %':    f"{_flag_under(row['gc_k20'],    cfg['gc_k20_anchor'],    False)}"
+                                  f" {row['gc_k20']:.1f}%",
+                    'SP QS %':    f"{_flag_under(row['gc_qs'],     cfg['gc_qs_anchor'],     False)}"
+                                  f" {row['gc_qs']:.1f}%",
+                    '4+HR %':     f"{_flag_under(row['gc_hr4'],    cfg['gc_hr4_anchor'],    True)}"
+                                  f" {row['gc_hr4']:.1f}%",
+                })
+            if display_rows:
+                st.dataframe(
+                    pd.DataFrame(display_rows),
+                    use_container_width=True, hide_index=True
+                )
 
     # ── TB line auto-suggest from prop odds ────────────────────────────────────
     # If prop data is available, check whether the book's line matches the

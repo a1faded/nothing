@@ -206,6 +206,39 @@ def render_stat_bar(df: pd.DataFrame):
         '<span class="lbl">Statcast ON</span></div>'
     ) if has_sc else ""
 
+    # ── Game Conditions quick indicators ─────────────────────────────────────
+    # Show slate-level GC environment as color-coded pills in the stat bar.
+    # Average across all games so the user sees the overall day's environment.
+    gc_badge = ""
+    _GC_NEEDED = ['gc_hits20','gc_k20','gc_hr4']
+    if all(c in df.columns for c in _GC_NEEDED):
+        from config import CONFIG as _cfg
+        avg_hits20 = df['gc_hits20'].mean()
+        avg_k20    = df['gc_k20'].mean()
+        avg_hr4    = df['gc_hr4'].mean()
+
+        # Hits: above median = hitter day (green for overs, no color for unders)
+        hits_color = "var(--hit)" if avg_hits20 > _cfg['gc_hits20_anchor'] else "var(--muted)"
+        # K%: above median = pitcher day
+        k_color    = "var(--xb)"  if avg_k20    > _cfg['gc_k20_anchor']    else "var(--muted)"
+        # HR: above median = power day
+        hr_color   = "var(--hr)"  if avg_hr4    > _cfg['gc_hr4_anchor']    else "var(--muted)"
+
+        gc_badge = (
+            f'<div class="stat-item">'
+            f'<span class="val" style="font-size:.72rem;color:{hits_color}">'
+            f'{avg_hits20:.0f}%</span>'
+            f'<span class="lbl">Hit Env</span></div>'
+            f'<div class="stat-item">'
+            f'<span class="val" style="font-size:.72rem;color:{k_color}">'
+            f'{avg_k20:.0f}%</span>'
+            f'<span class="lbl">K Env</span></div>'
+            f'<div class="stat-item">'
+            f'<span class="val" style="font-size:.72rem;color:{hr_color}">'
+            f'{avg_hr4:.0f}%</span>'
+            f'<span class="lbl">HR Env</span></div>'
+        )
+
     st.markdown(f"""
     <div class="stat-bar">
       <div class="stat-item">
@@ -228,7 +261,7 @@ def render_stat_bar(df: pd.DataFrame):
         <span class="val" style="color:var(--hr)">{avg_hr:.2f}%</span>
         <span class="lbl">Avg HR Prob</span>
       </div>
-      {lineup_badge}{sc_badge}
+      {gc_badge}{lineup_badge}{sc_badge}
     </div>
     """, unsafe_allow_html=True)
 

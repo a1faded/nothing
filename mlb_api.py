@@ -274,12 +274,30 @@ def get_pitcher_id_map() -> dict:
 
 
 def _lookup_player_mlbam(full_name: str) -> int | None:
-    """Resolve a player's full name to their MLBAM ID via statsapi."""
+    """
+    Resolve a player's full name to their MLBAM ID.
+
+    Primary: Tank01 player list (tank_player_list.json) — covers all 2,603 MLB
+    players including pitchers, loaded once at module level, zero API cost.
+    Fallback: statsapi.lookup_player() for players not in the local list
+    (e.g. mid-season call-ups added after the list was cached).
+    """
+    if not full_name:
+        return None
+    # Primary: local Tank01 player list
+    pid = _TANK_PLAYER_MAP.get(full_name.lower())
+    if pid:
+        return pid
+    # Try last-name-only for edge cases like "Framber Valdez" vs "Valdez"
+    last = full_name.split()[-1].lower()
+    pid  = _TANK_PLAYER_MAP_LAST.get(last)
+    if pid:
+        return pid
+    # Fallback: statsapi call (slower, for recent call-ups)
     try:
         players = statsapi.lookup_player(full_name)
         if not players:
             return None
-        # Prefer active players
         for p in players:
             if p.get('active') and p.get('id'):
                 return int(p['id'])
@@ -289,6 +307,46 @@ def _lookup_player_mlbam(full_name: str) -> int | None:
     except Exception:
         pass
     return None
+
+
+# ── Tank01 player list lookup (module-level, loaded once) ─────────────────────
+# Covers all 2,603 MLB players + pitchers. Zero API cost per lookup.
+# Falls back to statsapi only for call-ups not yet in the list.
+_TANK_PLAYER_MAP:      dict[str, int] = {}
+_TANK_PLAYER_MAP_LAST: dict[str, int] = {}
+
+def _load_tank_player_list():
+    """Load tank_player_list.json into module-level dicts for fast name→ID lookup."""
+    global _TANK_PLAYER_MAP, _TANK_PLAYER_MAP_LAST
+    import json, os
+    path = os.path.join(os.path.dirname(__file__), "tank_player_list.json")
+    if not os.path.exists(path):
+        return
+    try:
+        data    = json.load(open(path))
+        players = data.get("body", [])
+        full_map: dict[str, int] = {}
+        last_map: dict[str, int] = {}
+        for p in players:
+            name = (p.get("longName") or "").strip()
+            pid  = p.get("playerID")
+            if not name or not pid:
+                continue
+            try:
+                pid_int = int(pid)
+            except (ValueError, TypeError):
+                continue
+            full_map[name.lower()] = pid_int
+            last = name.split()[-1].lower()
+            if last not in last_map:    # first occurrence wins for duplicates
+                last_map[last] = pid_int
+        _TANK_PLAYER_MAP      = full_map
+        _TANK_PLAYER_MAP_LAST = last_map
+    except Exception:
+        pass
+
+# Load immediately on module import — fast, local file read
+_load_tank_player_list()
 
 
 def _lookup_pitcher_hand(full_name: str) -> str | None:
@@ -357,7 +415,64 @@ def get_recent_batting_form(days: int = 7) -> dict:
         return {}
 
 
-# ── PLAYER GAME LOG ───────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def get_recent_pitcher_form(days: int = 7) -> dict:
+    """
+    {pitcher_name: {era, whip, k_per9, bb_per9, games, ip}} for the last N days.
+
+    Uses pybaseball.pitching_stats_range() — one batch call covers all starters.
+    Same infrastructure as get_recent_batting_form() — zero extra API calls.
+
+    ERA and WHIP are the most direct under signals:
+    - Low ERA  = pitcher has been dominant recently → good for all unders
+    - Low WHIP = pitcher suppresses baserunners → good for hit/TB/HRR unders
+    - High K/9 = high strikeout rate → good for K-heavy under targets
+    - High BB/9 = walks freely → mixed signal (walks good for under, but high
+                  counts mean the pitcher is wild and may lose the zone)
+
+    Used in:
+      - unders.py Layer 3+ — enhances pitcher grade with recent form
+      - engine.py Stage 5 — adjusts HRR_Score for hot/cold starters
+
+    Missing pitchers → 0.0 adjustment (neutral — no penalty for missing data).
+    """
+    try:
+        from pybaseball import pitching_stats_range
+        end_dt   = date.today().strftime('%Y-%m-%d')
+        start_dt = (date.today() - timedelta(days=days)).strftime('%Y-%m-%d')
+        df = pitching_stats_range(start_dt, end_dt)
+        if df is None or df.empty:
+            return {}
+        df.columns = [c.strip() for c in df.columns]
+        # Need at minimum: Name, ERA, WHIP, G, IP
+        needed = ['Name','ERA','WHIP','G']
+        if not all(c in df.columns for c in needed):
+            return {}
+        result = {}
+        for _, row in df.iterrows():
+            name = str(row.get('Name', '')).strip()
+            g    = int(row.get('G',  0) or 0)
+            ip   = float(row.get('IP', 0) or 0)
+            if not name or g == 0:
+                continue
+            era  = float(row.get('ERA',  99.0) or 99.0)
+            whip = float(row.get('WHIP',  3.0) or  3.0)
+            # K/9 and BB/9 when available
+            so   = float(row.get('SO',  0) or 0)
+            bb   = float(row.get('BB',  0) or 0)
+            k9   = round((so / ip) * 9, 2) if ip > 0 else 0.0
+            bb9  = round((bb / ip) * 9, 2) if ip > 0 else 0.0
+            result[name] = {
+                'era':    round(era,  2),
+                'whip':   round(whip, 2),
+                'k_per9': k9,
+                'bb_per9':bb9,
+                'games':  g,
+                'ip':     round(ip, 1),
+            }
+        return result
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=600)
 def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:

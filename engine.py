@@ -398,10 +398,27 @@ def compute_scores(df: pd.DataFrame,
         df['Single_Score_base'] = (df['Single_Score_base'] - hr_pen).clip(0, 100).round(1)
 
     # ── Stage 5: HRR Score (Hits + Runs + RBIs composite) ────────────────────
-    # Prop: Player totals hits + runs scored + RBIs ≥ 2.
-    # Batting order is the dominant signal — cleanup/leadoff produce 80%+ of events.
-    # BvP OPS is the best historical predictor when enough AB exist.
     cfg = CONFIG
+
+    # BvP AVG overlay on Hit_Score FIRST — so HRR uses the corrected score
+    if 'bvp_avg' in df.columns and 'bvp_conf' in df.columns:
+        bvp_avg  = pd.to_numeric(df['bvp_avg'],  errors='coerce').fillna(cfg['league_avg'])
+        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
+        bvp_avg_adj = ((bvp_avg - cfg['league_avg']) * cfg['bvp_avg_weight']
+                       ).clip(-cfg['bvp_avg_max'], cfg['bvp_avg_max']) * bvp_conf
+        df['Hit_Score']      = (df['Hit_Score']      + bvp_avg_adj).clip(0, 100).round(1)
+        df['Hit_Score_base'] = (df['Hit_Score_base'] + bvp_avg_adj).clip(0, 100).round(1)
+
+    # BvP HR bonus on HR_Score FIRST — so HRR uses the corrected score
+    if 'bvp_hr' in df.columns and 'bvp_conf' in df.columns:
+        bvp_hr   = pd.to_numeric(df['bvp_hr'],   errors='coerce').fillna(0)
+        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
+        bvp_hr_adj = (bvp_hr * cfg['bvp_hr_bonus']
+                      ).clip(0, cfg['bvp_hr_bonus_max']) * bvp_conf
+        df['HR_Score']      = (df['HR_Score']      + bvp_hr_adj).clip(0, 100).round(1)
+        df['HR_Score_base'] = (df['HR_Score_base'] + bvp_hr_adj).clip(0, 100).round(1)
+
+    # NOW capture score series — includes BvP adjustments above
     hit_s = df['Hit_Score'].clip(0, 100)
     hr_s  = df['HR_Score'].clip(0, 100)
 
@@ -409,50 +426,27 @@ def compute_scores(df: pd.DataFrame,
     order_hrr = pd.Series(0.0, index=df.index)
     if '_order_pos' in df.columns:
         pos = pd.to_numeric(df['_order_pos'], errors='coerce')
-        # Slots 1-5: most R+RBI opportunities
         order_hrr = order_hrr.where(~pos.isin([1, 2, 3, 4, 5]),
                                      order_hrr + cfg['hrr_order_bonus'])
-        # Slots 7-9: fewest at-bats, least RBI/run context
         order_hrr = order_hrr.where(~pos.isin([7, 8, 9]),
                                      order_hrr - cfg['hrr_order_penalty'])
 
     # GC run environment bonus
     gc_hrr = pd.Series(0.0, index=df.index)
-    if all(c in df.columns for c in ['gc_runs10']):
+    if 'gc_runs10' in df.columns:
         gc_runs = pd.to_numeric(df['gc_runs10'], errors='coerce').fillna(
             cfg['gc_runs10_anchor'])
         gc_hrr = ((gc_runs - cfg['gc_runs10_anchor']) * cfg['hrr_gc_weight']
                   ).clip(-cfg['hrr_gc_max'], cfg['hrr_gc_max'])
 
-    # BvP OPS signal (only when bvp_conf is high enough)
+    # BvP OPS signal — confidence-weighted
     bvp_hrr = pd.Series(0.0, index=df.index)
     if 'bvp_ops' in df.columns and 'bvp_conf' in df.columns:
-        bvp_ops  = pd.to_numeric(df['bvp_ops'],  errors='coerce').fillna(
-            cfg['hrr_bvp_ops_lg'])
+        bvp_ops  = pd.to_numeric(df['bvp_ops'],  errors='coerce').fillna(cfg['hrr_bvp_ops_lg'])
         bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
         bvp_raw  = ((bvp_ops - cfg['hrr_bvp_ops_lg']) * cfg['hrr_bvp_weight']
                     ).clip(-cfg['hrr_bvp_max'], cfg['hrr_bvp_max'])
-        bvp_hrr  = bvp_raw * bvp_conf   # scale by confidence (0 when AB < min)
-
-    # BvP AVG overlay on Hit_Score (when BvP data available)
-    if 'bvp_avg' in df.columns and 'bvp_conf' in df.columns:
-        bvp_avg  = pd.to_numeric(df['bvp_avg'],  errors='coerce').fillna(
-            cfg['league_avg'])
-        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
-        bvp_avg_adj = ((bvp_avg - cfg['league_avg']) * cfg['bvp_avg_weight']
-                       ).clip(-cfg['bvp_avg_max'], cfg['bvp_avg_max'])
-        bvp_avg_adj = bvp_avg_adj * bvp_conf
-        df['Hit_Score']      = (df['Hit_Score']      + bvp_avg_adj).clip(0,100).round(1)
-        df['Hit_Score_base'] = (df['Hit_Score_base'] + bvp_avg_adj).clip(0,100).round(1)
-
-    # BvP HR bonus on HR_Score
-    if 'bvp_hr' in df.columns and 'bvp_conf' in df.columns:
-        bvp_hr   = pd.to_numeric(df['bvp_hr'],   errors='coerce').fillna(0)
-        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
-        bvp_hr_adj = (bvp_hr * cfg['bvp_hr_bonus']
-                      ).clip(0, cfg['bvp_hr_bonus_max']) * bvp_conf
-        df['HR_Score']      = (df['HR_Score']      + bvp_hr_adj).clip(0,100).round(1)
-        df['HR_Score_base'] = (df['HR_Score_base'] + bvp_hr_adj).clip(0,100).round(1)
+        bvp_hrr  = bvp_raw * bvp_conf
 
     # Compose HRR_Score
     hrr_raw = (

@@ -378,6 +378,7 @@ def main():
                                       handedness_map=handedness_map)
                 player_id_map = _get_player_id_map(df)
                 df = _enrich_with_ids(df, player_id_map)
+                df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
                 df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
                 df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
             under_page(df, filters_base={})

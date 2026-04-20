@@ -46,46 +46,36 @@ from helpers import grade_pill, style_grade_cell
 
 def compute_under_scores(df: pd.DataFrame,
                          form_map: dict | None = None,
-                         use_gc:   bool = True) -> pd.DataFrame:
+                         use_gc:   bool = True,
+                         pitcher_form: dict | None = None) -> pd.DataFrame:
     """
-    Full 8+1 layer under score computation. Vectorized throughout.
+    Full 8+1+1 layer under score computation. Vectorized throughout.
 
     Signal architecture:
-      Layer 1 — Primary offensive scores, GC-adjusted when use_gc=True (Fix 1)
-      Layer 2 — K% and BB% (non-contact plate appearance outcomes)
-      Layer 3 — Pitcher grade
-      Layer 4 — Historical matchup AVG/PA (BallPark Pal)
-      Layer 5 — Recent XB rate (7-day 2B+3B/G from pybaseball)
-      Layer 6 — Recent hit rate (7-day H/G — cold hitter signal for Hit Under)
-      Layer 7 — Statcast contact quality (Barrel%, HH%, AvgEV, xSLG, xBA, xwOBA)
-      Layer 8 — vs Grade + park factor (matchup context)
-      Layer 9 — Game conditions suppression (Fix 2) — pitcher/game environment today
+      Layer 1  — Primary offensive scores, GC-adjusted when use_gc=True
+      Layer 2  — K% and BB%
+      Layer 3  — Pitcher grade + pitcher recent ERA/WHIP (7-day form)
+      Layer 4  — Historical matchup AVG/PA
+      Layer 5  — Recent XB rate (7-day)
+      Layer 6  — Recent hit rate (7-day cold hitter signal)
+      Layer 7  — Statcast contact quality
+      Layer 8  — vs Grade + park factor
+      Layer 9  — Game conditions suppression
+      Layer 10 — Batting order position
+      Layer 11 — Platoon split
 
-    Fix 1: When use_gc=True, use Hit_Score_gc/XB_Score_gc/HR_Score_gc as the
-           primary Layer 1 inputs. These already encode park, weather, and game
-           environment from compute_game_condition_scores(). Falls back to base
-           scores if GC variants not in df.
-
-    Fix 2: Layer 9 adds a direct gc_suppression bonus from today's GC data:
-           low gc_hits20 + low gc_runs10 + high gc_k20 + high gc_qs = pitcher day.
-           For XB/HR unders: also factors in low gc_hr4.
-           Applied to all four under types, ±6 pts max.
-
-    All Statcast signals neutral (0.0) when NaN. All form signals neutral when
-    player not in map or <3 games. Hist signal neutral when PA < under_hist_min_pa.
+    pitcher_form: {pitcher_name: {era, whip, k_per9, bb_per9}} from get_recent_pitcher_form()
     """
     df       = df.copy()
     cfg      = CONFIG
-    form_map = form_map or {}
+    form_map     = form_map     or {}
+    pitcher_form = pitcher_form or {}
 
     for col in ['Hit_Score','Single_Score','XB_Score','HR_Score']:
         if col not in df.columns:
             df[col] = 50.0
 
-    # ── FIX 1: Use GC-adjusted scores as Layer 1 primary ─────────────────────
-    # GC scores incorporate park, weather, game total, and pitcher environment.
-    # Inverting GC scores gives a more accurate "how bad is this matchup today"
-    # signal than inverting base scores. Falls back gracefully when not available.
+    # ── FIX 1: GC-adjusted scores as Layer 1 ─────────────────────────────────
     def _gc_or_base(gc_col: str, base_col: str) -> pd.Series:
         if use_gc and gc_col in df.columns:
             return pd.to_numeric(df[gc_col], errors='coerce').fillna(
@@ -96,16 +86,12 @@ def compute_under_scores(df: pd.DataFrame,
     hit    = _gc_or_base('Hit_Score_gc',    'Hit_Score')
     xb     = _gc_or_base('XB_Score_gc',     'XB_Score')
     hr     = _gc_or_base('HR_Score_gc',     'HR_Score')
-    # Single stays as base — no GC variant changes its meaning for unders
     single = df['Single_Score'].clip(0, 100)
 
-    # ── Raw probability columns ───────────────────────────────────────────────
     k  = pd.to_numeric(df.get('p_k',  0), errors='coerce').fillna(0)
     bb = pd.to_numeric(df.get('p_bb', 0), errors='coerce').fillna(0)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # LAYER 2 — K% and BB% bonuses
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Layer 2: K% and BB% ───────────────────────────────────────────────────
     k_bonus = ((k - cfg['league_k_avg']) * cfg['under_k_weight']).clip(lower=0)
 
     bb_xb   = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_xb']  ).clip(lower=0)
@@ -113,9 +99,8 @@ def compute_under_scores(df: pd.DataFrame,
     bb_tb05 = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_tb05']).clip(lower=0)
     bb_hit  = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_hit'] ).clip(lower=0)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # LAYER 3 — Pitcher grade bonus
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Layer 3: Pitcher grade + recent form ──────────────────────────────────
+    # Grade bonus: static season-level quality
     def _pgbonus(grade):
         return (cfg['under_pitcher_bonus'] if grade == 'A+' else
                 cfg['under_pitcher_a']     if grade == 'A'  else 0.0)
@@ -123,6 +108,30 @@ def compute_under_scores(df: pd.DataFrame,
     p_bonus = df['pitch_grade'].apply(_pgbonus) \
               if 'pitch_grade' in df.columns \
               else pd.Series(0.0, index=df.index)
+
+    # Pitcher recent form bonus: low ERA/WHIP in last 7 days = extra suppression
+    # ERA league avg ~4.20 — below = dominant, above = hittable
+    # WHIP league avg ~1.30 — below = clean, above = hitters reaching base
+    ERA_LG  = 4.20
+    WHIP_LG = 1.30
+
+    def _pitcher_form_bonus(pitcher_name: str) -> float:
+        if not pitcher_name or not pitcher_form:
+            return 0.0
+        # Try full name then last name
+        pf = pitcher_form.get(pitcher_name)
+        if not pf:
+            last = pitcher_name.split()[-1]
+            pf   = pitcher_form.get(last)
+        if not pf or pf.get('games', 0) < 1:
+            return 0.0
+        era_bonus  = np.clip((ERA_LG  - pf['era'])  * 0.8, -3.0, 3.0)
+        whip_bonus = np.clip((WHIP_LG - pf['whip']) * 3.0, -2.0, 2.0)
+        return float(era_bonus + whip_bonus)
+
+    p_form_bonus = df['Pitcher'].apply(_pitcher_form_bonus) \
+                   if 'Pitcher' in df.columns \
+                   else pd.Series(0.0, index=df.index)
 
     # ─────────────────────────────────────────────────────────────────────────
     # LAYER 4 — Historical matchup AVG/PA
@@ -243,9 +252,13 @@ def compute_under_scores(df: pd.DataFrame,
 
         gc_general    = (hits_sig + runs_sig + k_sig + qs_sig).clip(-gc_max, gc_max)
         gc_power_supp = (hits_sig + runs_sig + k_sig + qs_sig + hr_sig).clip(-gc_max, gc_max)
+        # HRR under: low-scoring environment = fewer run/RBI opportunities
+        # Invert runs_sig — below-median runs = good for HRR under = positive
+        gc_hrr_over   = (runs_sig * 1.5 + hits_sig * 0.5).clip(-gc_max, gc_max)
     else:
         gc_general    = pd.Series(0.0, index=df.index)
         gc_power_supp = pd.Series(0.0, index=df.index)
+        gc_hrr_over   = pd.Series(0.0, index=df.index)
 
     # ─────────────────────────────────────────────────────────────────────────
     # LAYER 10 — Batting order position
@@ -296,7 +309,7 @@ def compute_under_scores(df: pd.DataFrame,
       + (100 - hr)  * 0.22      # L1
       + (100 - hit) * 0.08      # L1
       + k_bonus + bb_xb         # L2
-      + p_bonus                  # L3
+      + p_bonus + p_form_bonus  # L3
       + hist_xb                  # L4
       + xb_rate_adj              # L5
       + barrel_adj               # L7
@@ -317,7 +330,7 @@ def compute_under_scores(df: pd.DataFrame,
       + (100 - hr)  * 0.28      # L1
       + single_profile_bonus
       + k_bonus + bb_tb15       # L2
-      + p_bonus                  # L3
+      + p_bonus + p_form_bonus  # L3
       + hist_tb15                # L4
       + xb_rate_adj * 0.7       # L5
       + xslg_adj * 0.8          # L7
@@ -335,7 +348,7 @@ def compute_under_scores(df: pd.DataFrame,
       + (100 - xb)  * 0.28      # L1
       + (100 - hr)  * 0.22      # L1
       + k_bonus * 1.2 + bb_tb05 # L2
-      + p_bonus                  # L3
+      + p_bonus + p_form_bonus  # L3
       + hist_tb05                # L4
       + hit_rate_adj             # L6
       + xba_adj   * 0.7         # L7
@@ -350,7 +363,7 @@ def compute_under_scores(df: pd.DataFrame,
     df['Under_Hit_Score'] = (
         (100 - hit) * 0.45      # L1
       + k_bonus * 1.8 + bb_hit  # L2
-      + p_bonus                  # L3
+      + p_bonus + p_form_bonus  # L3
       + hist_hit                 # L4
       + hit_rate_adj * 1.2      # L6
       + xba_adj                  # L7
@@ -359,6 +372,33 @@ def compute_under_scores(df: pd.DataFrame,
       + gc_general * 1.1        # L9
       + order_adj                # L10
       + platoon_adj              # L11
+    ).clip(0, 100).round(1)
+
+    # ── H+R+RBI Under ─────────────────────────────────────────────────────────
+    # Fading a player's composite H+R+RBI total.
+    # The prop cashes UNDER when the player accumulates fewer than 2 combined.
+    # Key: batting order is the dominant signal INVERTED — slots 7-9 are ideal
+    # (rarely score or drive in runs). Cleanup slots 3-5 are BAD for this under
+    # (most dangerous for accumulating H+R+RBI). Low-scoring game = good.
+    # Under_HRR_Score = inverted HRR_Score (in df if Stage 5 ran) + GC suppression.
+    hrr_base = pd.Series(50.0, index=df.index)
+    if 'HRR_Score' in df.columns:
+        hrr_base = pd.to_numeric(df['HRR_Score'], errors='coerce').fillna(50.0)
+
+    # Order signal is flipped: late-order = GOOD for HRR under
+    order_hrr_under = -order_adj   # invert: penalty where over gets bonus
+
+    df['Under_HRR_Score'] = (
+        (100 - hrr_base) * 0.55  # primary: invert the HRR over score
+      + k_bonus * 1.0             # K% still good (no H contribution)
+      + bb_hit                    # BB% good (walk = no RBI if bases empty)
+      + p_bonus                   # elite pitcher suppresses all
+      + hist_hit  * 0.8           # historical AVG (weak matchup = fewer H)
+      + hit_rate_adj              # cold hitter = fewer hits = fewer H+R+RBI
+      + xwoba_adj * 0.6           # low offensive quality
+      + vsgrade_adj               # poor matchup
+      - gc_hrr_over               # low-scoring game environment = good for under
+      + order_hrr_under           # late-order batters = fewer R/RBI opportunities
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────
@@ -370,6 +410,12 @@ def compute_under_scores(df: pd.DataFrame,
                        (xb  > cfg['under_tb_disq_any']) | \
                        (hr  > cfg['under_tb_disq_any'])
     df['_disq_hit']  = hit > cfg['under_hit_disq_hit']
+    # HRR Under: disqualify when batting order slots 1-5 AND high Hit_Score
+    # (cleanup hitters in good spots almost always accumulate H+R+RBI)
+    df['_disq_hrr']  = (hit > 65.0) & (
+        df.get('_order_pos', pd.Series(6, index=df.index))
+          .apply(lambda x: int(x) in [1,2,3,4,5] if pd.notna(x) else False)
+    )
 
     return df
 
@@ -417,6 +463,13 @@ def _disq_reason(row: pd.Series, target: str) -> str:
         hit = float(row.get('Hit_Score', 0) or 0)
         if hit > cfg['under_hit_disq_hit']:
             reasons.append(f"Hit={hit:.0f}")
+    elif target == 'hrr':
+        hit = float(row.get('Hit_Score', 0) or 0)
+        pos = row.get('_order_pos')
+        if hit > 65.0:
+            reasons.append(f"Hit={hit:.0f}")
+        if pd.notna(pos) and int(pos) in [1,2,3,4,5]:
+            reasons.append(f"Slot #{int(pos)} (high R/RBI opportunity)")
     return ", ".join(reasons)
 
 
@@ -441,6 +494,7 @@ def build_under_filters(df: pd.DataFrame) -> dict:
         "📊 TB Under 1.5 — Under 1.5 Total Bases":         "tb15",
         "📉 TB Under 0.5 — No Bases At All":               "tb05",
         "❌ Hit Under — No Hit (0.5 line)":                 "hit",
+        "🔴 H+R+RBI Under — Under 1.5 Hits+Runs+RBIs":    "hrr",
     }
     u_label            = st.sidebar.selectbox("Choose Under Target", list(under_map.keys()))
     filters['under']   = under_map[u_label]
@@ -451,12 +505,14 @@ def build_under_filters(df: pd.DataFrame) -> dict:
         'tb15': 'Under_TB15_Score',
         'tb05': 'Under_TB05_Score',
         'hit':  'Under_Hit_Score',
+        'hrr':  'Under_HRR_Score',
     }
     disq_col_map = {
         'xb':   '_disq_xb',
         'tb15': '_disq_tb15',
         'tb05': '_disq_tb05',
         'hit':  '_disq_hit',
+        'hrr':  '_disq_hrr',
     }
     filters['under_score_col'] = score_col_map[filters['under']]
     filters['under_disq_col']  = disq_col_map[filters['under']]
@@ -677,6 +733,7 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         'Under_TB15_Score': '📊 TB Under 1.5',
         'Under_TB05_Score': '📉 TB Under 0.5',
         'Under_Hit_Score':  '❌ Hit Under',
+        'Under_HRR_Score':  '🔴 H+R+RBI Under',
     }
 
     col_order = ['Batter','Team','Pitcher','pitch_grade','Disq',
@@ -902,6 +959,7 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         'tb15': f"Disqualified if XB_Score>{cfg['under_xb_disq_hr']:.0f} or HR_Score>{cfg['under_xb_disq_hr']:.0f} — singles are FINE for this line",
         'tb05': f"Disqualified if ANY of Hit/XB/HR_Score>{cfg['under_tb_disq_any']:.0f}",
         'hit':  f"Disqualified if Hit_Score>{cfg['under_hit_disq_hit']:.0f}",
+        'hrr':  "Disqualified if Hit_Score>65 AND batting order slot 1-5 (cleanup hitters almost always accumulate H+R+RBI)",
     }.get(target, "")
 
     st.markdown(
@@ -949,14 +1007,18 @@ def under_page(df: pd.DataFrame, filters_base: dict):
     # Build sidebar filters FIRST — use_gc must be known before scoring
     filters = build_under_filters(df)
 
-    # Now compute under scores with the correct use_gc from filters
+    # Compute under scores with form maps and GC from filters
     try:
-        from mlb_api import get_recent_batting_form as _get_form
-        _form = _get_form(days=7)
+        from mlb_api import get_recent_batting_form as _get_form, \
+                            get_recent_pitcher_form as _get_pitcher_form
+        _form         = _get_form(days=7)
+        _pitcher_form = _get_pitcher_form(days=7)
     except Exception:
-        _form = {}
+        _form         = {}
+        _pitcher_form = {}
     df = compute_under_scores(df, form_map=_form,
-                              use_gc=filters.get('use_gc', True))
+                              use_gc=filters.get('use_gc', True),
+                              pitcher_form=_pitcher_form)
 
     # Apply confirmed lineup filter (same logic as main page)
     if filters.get('confirmed_only'):

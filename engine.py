@@ -448,6 +448,68 @@ def compute_scores(df: pd.DataFrame,
                     ).clip(-cfg['hrr_bvp_max'], cfg['hrr_bvp_max'])
         bvp_hrr  = bvp_raw * bvp_conf
 
+    # BvP H+RBI rate — direct prop proxy: (career H + RBI) / AB vs this pitcher
+    # More specific than OPS for this exact prop. Complements the OPS signal.
+    # League reference: ~0.40 combined H+RBI per AB (AVG .245 + RBI/PA ~.12 + overlap)
+    bvp_hrr_rate = pd.Series(0.0, index=df.index)
+    if all(c in df.columns for c in ['bvp_h','bvp_rbi','bvp_ab','bvp_conf']):
+        bvp_h    = pd.to_numeric(df['bvp_h'],    errors='coerce').fillna(0)
+        bvp_rbi  = pd.to_numeric(df['bvp_rbi'],  errors='coerce').fillna(0)
+        bvp_ab   = pd.to_numeric(df['bvp_ab'],   errors='coerce').fillna(0)
+        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
+        # Only compute when AB > 0
+        hrr_rate = (bvp_h + bvp_rbi).where(bvp_ab > 0, 0) / bvp_ab.where(bvp_ab > 0, 1)
+        HRR_RATE_LG = cfg.get('hrr_bvp_rate_lg', 0.40)
+        hrr_rate_adj = ((hrr_rate - HRR_RATE_LG) * cfg.get('hrr_bvp_rate_weight', 8.0)
+                        ).clip(-cfg.get('hrr_bvp_rate_max', 4.0),
+                                cfg.get('hrr_bvp_rate_max', 4.0)) * bvp_conf
+        bvp_hrr_rate = hrr_rate_adj.where(bvp_ab >= cfg.get('bvp_min_ab', 5), 0.0)
+
+    # Predecessor OBP signal — lineup protection
+    # A cleanup hitter needs someone ahead to get on base before they can get an RBI.
+    # For each batter, compute the average hit probability of the 1-2 batters
+    # immediately ahead in the same team's batting order.
+    # Only fires when _order_pos is confirmed (post-lineup confirmation).
+    # Cap ±3 pts — context signal, not primary.
+    pred_obp = pd.Series(0.0, index=df.index)
+    if '_order_pos' in df.columns and 'total_hit_prob' in df.columns:
+        # Build a lookup: (Team, order_pos) → total_hit_prob
+        slot_hitprob: dict[tuple, float] = {}
+        for _, r in df.iterrows():
+            pos = r.get('_order_pos')
+            team = r.get('Team', '')
+            hp   = r.get('total_hit_prob', 0.0)
+            if pd.notna(pos) and team:
+                slot_hitprob[(team, int(pos))] = float(hp or 0.0)
+
+        # League average hit prob for reference
+        LG_HITPROB = float(df['total_hit_prob'].median() or 25.0)
+        PRED_WEIGHT = cfg.get('hrr_pred_weight', 0.08)
+        PRED_MAX    = cfg.get('hrr_pred_max',    3.0)
+
+        def _pred_signal(row) -> float:
+            pos  = row.get('_order_pos')
+            team = row.get('Team', '')
+            if pd.isna(pos) or not team:
+                return 0.0
+            pos = int(pos)
+            # Slots 1-2: they ARE the table-setters — predecessor signal less relevant
+            if pos <= 2:
+                return 0.0
+            # Look up 1-2 predecessors
+            pred_probs = []
+            for p in [pos - 1, pos - 2]:
+                if p >= 1:
+                    hp = slot_hitprob.get((team, p))
+                    if hp is not None:
+                        pred_probs.append(hp)
+            if not pred_probs:
+                return 0.0
+            avg_pred = sum(pred_probs) / len(pred_probs)
+            return float(np.clip((avg_pred - LG_HITPROB) * PRED_WEIGHT, -PRED_MAX, PRED_MAX))
+
+        pred_obp = df.apply(_pred_signal, axis=1)
+
     # Compose HRR_Score
     hrr_raw = (
         hit_s * cfg['hrr_hit_weight']
@@ -455,6 +517,8 @@ def compute_scores(df: pd.DataFrame,
       + hr_s  * cfg['hrr_hr_weight']
       + gc_hrr
       + bvp_hrr
+      + bvp_hrr_rate   # direct H+RBI per AB vs this pitcher
+      + pred_obp        # lineup protection — predecessor hit probability
     )
     df['HRR_Score']      = normalize_0_100(hrr_raw).round(1)
     df['HRR_Score_base'] = df['HRR_Score'].copy()   # park doesn't change HRR

@@ -178,16 +178,9 @@ CONFIG = {
     'hrr_gc_weight':     0.08,  # per % above gc_runs10_anchor (more runs = more H+R+RBI)
     'hrr_gc_max':        5.0,   # cap ±5 pts GC contribution
     # BvP OPS signal for HRR (applied in scoring when bvp_conf >= 0.33)
-    'hrr_bvp_ops_lg':    0.750, # league avg OPS reference for BvP signal
+    'hrr_bvp_ops_lg':    0.750, # league avg OPS ~.750 for reference
     'hrr_bvp_weight':   10.0,   # pts per OPS unit above/below league avg
     'hrr_bvp_max':       5.0,   # cap ±5 pts
-    # BvP H+RBI rate — direct prop proxy
-    'hrr_bvp_rate_lg':   0.40,  # league avg (H+RBI)/AB (~.245 AVG + ~.12 RBI/PA)
-    'hrr_bvp_rate_weight':8.0,  # pts per rate unit above league
-    'hrr_bvp_rate_max':  4.0,   # cap ±4 pts
-    # Predecessor OBP (lineup protection)
-    'hrr_pred_weight':   0.08,  # pts per % above median hit prob for predecessor slot
-    'hrr_pred_max':      3.0,   # cap ±3 pts
 
     # ── BvP scoring weights (used across all score types) ─────────────────────
     'bvp_avg_weight':   18.0,   # pts per AVG unit above/below league avg

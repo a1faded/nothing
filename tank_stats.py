@@ -382,23 +382,7 @@ def enrich_with_splits(df: pd.DataFrame,
         batter     = row.get("Batter", "")
         batter_id  = player_id_map.get(batter)
         pitcher_id = pitcher_id_map.get(batter)
-        p_hand     = row.get("_pitcher_hand")  # 'L' or 'R', may be None
-
-        # ── Resolve pitcher hand from MLBAM ID when not yet known ────────────
-        # _pitcher_hand is set by _merge_signal_metadata but can be None when
-        # the pitcher wasn't in the schedule API's probable pitchers list.
-        # Use _lookup_pitcher_hand_by_id() as a reliable fallback — ID-based
-        # lookup is unambiguous and much more reliable than name matching.
-        if p_hand not in ("L", "R") and pitcher_id:
-            try:
-                from mlb_api import _lookup_pitcher_hand_by_id as _lphid
-                resolved = _lphid(int(pitcher_id))
-                if resolved in ("L", "R"):
-                    p_hand = resolved
-                    # Also update the df column so downstream code benefits
-                    df.at[idx, "_pitcher_hand"] = p_hand
-            except Exception:
-                pass
+        p_hand     = row.get("_pitcher_hand")  # 'L' or 'R'
 
         # Batter splits: how does this batter hit vs this pitcher's hand?
         if batter_id and p_hand in ("L", "R"):
@@ -406,6 +390,7 @@ def enrich_with_splits(df: pd.DataFrame,
             split_key = f"vs. {'Right' if p_hand == 'R' else 'Left'}"
             s = splits.get(split_key, {})
             if s:
+                # AB > 0 check — splits with 0 AB are empty categories
                 ab_s = _safe_int(s.get("AB", 0))
                 if ab_s > 0:
                     df.at[idx, "split_avg"] = _safe_float(str(s.get("AVG", 0)))

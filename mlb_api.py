@@ -367,33 +367,6 @@ def _lookup_pitcher_hand(full_name: str) -> str | None:
     return None
 
 
-@st.cache_data(ttl=86400)
-def _lookup_pitcher_hand_by_id(mlbam_id: int) -> str | None:
-    """
-    Resolve pitcher throwing hand by MLBAM ID — more reliable than name lookup
-    because IDs are unambiguous. Cached 24h.
-
-    Used as primary pitcher hand resolution in enrich_with_splits when
-    _pitcher_hand wasn't set by the handedness map (e.g. pitcher wasn't
-    listed as a probable starter yet in the schedule API).
-    """
-    try:
-        data = statsapi.get_person(mlbam_id)
-        hand = (data.get('pitchHand') or {}).get('code')
-        if hand in ('L', 'R'):
-            return hand
-        # Fallback: player_stat_data sometimes has this in bio
-        bio = statsapi.player_stat_data(mlbam_id, type='pitching', stats=['career'])
-        ph  = bio.get('pitchHand')
-        if isinstance(ph, dict):
-            hand = ph.get('code')
-            if hand in ('L', 'R'):
-                return hand
-    except Exception:
-        pass
-    return None
-
-
 # ── ROLLING 7-DAY FORM (NEW) ──────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600)
@@ -698,74 +671,7 @@ def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=1800)
-def get_hrr_game_log_map(player_ids: tuple, last_n: int = 10) -> dict:
-    """
-    Batch-fetch game log data for a set of players (top HRR candidates).
-    Returns {player_id: hrr_summary} where hrr_summary is:
-      {
-        'hrr_games':   int,   # games where H+R+RBI >= 2
-        'total_games': int,   # total games checked
-        'hrr_rate':    float, # games_with_hrr / total_games
-        'avg_h':  float, 'avg_r':  float, 'avg_rbi': float,
-        'last_n':      int,   # how many games were fetched
-      }
-
-    Called lazily — only after scoring/filtering narrows to top candidates.
-    Capped at 20 players per call to keep API cost low.
-    Cached 30 minutes so repeated filter changes don't re-hit the API.
-
-    A game counts as "HRR ≥ 2" when (H + R + RBI) >= 2 in that game.
-    """
-    if not _STATSAPI_OK or not player_ids:
-        return {}
-
-    result: dict[int, dict] = {}
-    for player_id in list(player_ids)[:20]:    # hard cap at 20
-        try:
-            log_df = get_player_game_log(int(player_id), last_n=last_n)
-            if log_df.empty:
-                continue
-
-            # Filter to games where the player actually had an at-bat
-            played = log_df[log_df.get('AB', pd.Series(dtype=int)) > 0].copy() \
-                     if 'AB' in log_df.columns else log_df.copy()
-            if played.empty:
-                continue
-
-            played = played.head(last_n)    # most recent N
-            total  = len(played)
-
-            h_col   = 'H'   if 'H'   in played.columns else None
-            r_col   = 'R'   if 'R'   in played.columns else None
-            rbi_col = 'RBI' if 'RBI' in played.columns else None
-
-            if not h_col:
-                continue
-
-            # Compute H+R+RBI per game
-            h_s   = pd.to_numeric(played[h_col],   errors='coerce').fillna(0)
-            r_s   = pd.to_numeric(played[r_col],   errors='coerce').fillna(0) \
-                    if r_col else pd.Series(0, index=played.index)
-            rbi_s = pd.to_numeric(played[rbi_col], errors='coerce').fillna(0) \
-                    if rbi_col else pd.Series(0, index=played.index)
-
-            hrr_per_game = h_s + r_s + rbi_s
-            hrr_games    = int((hrr_per_game >= 2).sum())
-
-            result[int(player_id)] = {
-                'hrr_games':   hrr_games,
-                'total_games': total,
-                'hrr_rate':    hrr_games / total if total > 0 else 0.0,
-                'avg_h':       round(float(h_s.mean()),   2),
-                'avg_r':       round(float(r_s.mean()),   2),
-                'avg_rbi':     round(float(rbi_s.mean()), 2),
-                'last_n':      total,
-            }
-        except Exception:
-            continue
-
-    return result
+def _i(val) -> int:
     try:    return int(val)
     except: return 0
 

@@ -166,6 +166,30 @@ CONFIG = {
     'luck_weight':  18.0,          # multiplier for (xBA - fg_AVG)
     'luck_max_adj':  2.0,          # cap ±pts
 
+    # ── H+R+RBI Score ─────────────────────────────────────────────────────────
+    # Composite prop: player gets credit for hits + runs scored + RBIs.
+    # Batting order is the strongest signal — cleanup/leadoff generate most events.
+    # BvP OPS is the best single historical predictor for this prop.
+    'hrr_hit_weight':    0.40,  # fraction from Hit_Score (contact is the foundation)
+    'hrr_order_weight':  0.35,  # fraction from batting order bonus
+    'hrr_hr_weight':     0.25,  # fraction from HR_Score (HR = +1 run +1 RBI guaranteed)
+    'hrr_order_bonus':   8.0,   # pts added for slots 1-5 (cleanup/leadoff run producers)
+    'hrr_order_penalty': 5.0,   # pts subtracted for slots 7-9 (fewest R/RBI opportunities)
+    'hrr_gc_weight':     0.08,  # per % above gc_runs10_anchor (more runs = more H+R+RBI)
+    'hrr_gc_max':        5.0,   # cap ±5 pts GC contribution
+    # BvP OPS signal for HRR (applied in scoring when bvp_conf >= 0.33)
+    'hrr_bvp_ops_lg':    0.750, # league avg OPS ~.750 for reference
+    'hrr_bvp_weight':   10.0,   # pts per OPS unit above/below league avg
+    'hrr_bvp_max':       5.0,   # cap ±5 pts
+
+    # ── BvP scoring weights (used across all score types) ─────────────────────
+    'bvp_avg_weight':   18.0,   # pts per AVG unit above/below league avg
+    'bvp_avg_max':       4.0,   # cap ±4 pts
+    'bvp_hr_bonus':      1.5,   # pts per career HR vs this pitcher (capped)
+    'bvp_hr_bonus_max':  4.0,   # cap on HR bonus
+    'bvp_ops_weight':   10.0,   # pts per OPS unit (used for HRR)
+    'bvp_min_ab':        5,     # minimum AB for any BvP signal to fire
+
     # ── Pitcher handedness / platoon ──────────────────────────────────────────
     # Opposite-hand batter vs pitcher = natural platoon advantage.
     # Set use_platoon=False if BallPark Pal already models handedness splits.
@@ -200,9 +224,11 @@ NICK_TO_ABBR = {
 SCORE_MAP = {
     '🎯 Hit':'Hit_Score','1️⃣ Single':'Single_Score',
     '🔥 XB (Double/Triple)':'XB_Score','💣 HR':'HR_Score',
+    '🔴 H+R+RBI':'HRR_Score',
 }
 LABEL_MAP = {v:k for k,v in SCORE_MAP.items()}
 SCORE_CSS = {
     'Hit_Score':'var(--hit)','Single_Score':'var(--single)',
     'XB_Score':'var(--xb)','HR_Score':'var(--hr)',
+    'HRR_Score':'var(--accent)',
 }

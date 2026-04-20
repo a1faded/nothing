@@ -474,6 +474,121 @@ def get_recent_pitcher_form(days: int = 7) -> dict:
     except Exception:
         return {}
 
+
+@st.cache_data(ttl=21600)
+def get_pitcher_rest_map() -> dict:
+    """
+    {pitcher_name: {days_rest, last_ip, rest_signal}} for today's starters.
+
+    Fetches last start data for each probable starter via MLB Stats API game log.
+    Computes days of rest and workload from last outing.
+
+    rest_signal values:
+      +3.0  = 5+ days rest AND pitched deep last time (fresh, conditioned)
+      +2.0  = 5+ days rest (well rested)
+       0.0  = 4 days rest (standard rotation)
+      -1.5  = 3 days rest (short rest, fatigue risk)
+      -2.5  = ≤2 days rest (very short, significant risk)
+      Workload modifier: +1.0 if last_ip ≥ 7.0 (went deep = well-warmed arm)
+                         -1.0 if last_ip ≤ 3.0 (short outing = unknown state)
+
+    Cached 6 hours — starters don't change once announced.
+    Falls back gracefully: missing pitcher → no signal → 0.0 in scoring.
+    """
+    if not _STATSAPI_OK:
+        return {}
+    try:
+        today  = date.today()
+        games  = get_today_schedule()
+        result: dict[str, dict] = {}
+        seen:   set[str]        = set()
+
+        for g in games:
+            for key in ('away_probable_pitcher', 'home_probable_pitcher'):
+                name = (g.get(key) or '').strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                last = name.split()[-1]
+
+                player_id = _lookup_player_mlbam(name)
+                if not player_id:
+                    continue
+
+                try:
+                    data = statsapi.player_stat_data(
+                        player_id,
+                        type='pitching',
+                        stats=['gameLog'],
+                        group='pitching',
+                    )
+                    log = (data.get('stats', [{}])[0].get('splits', []))
+                    if not log:
+                        continue
+
+                    # Sort descending — most recent first, skip today
+                    log_sorted = sorted(log,
+                                        key=lambda s: s.get('date', ''),
+                                        reverse=True)
+                    last_start = None
+                    for entry in log_sorted:
+                        try:
+                            d = date.fromisoformat(entry.get('date', '')[:10])
+                        except ValueError:
+                            continue
+                        if d < today:
+                            last_start = entry
+                            break
+
+                    if not last_start:
+                        continue
+
+                    last_date = date.fromisoformat(last_start['date'][:10])
+                    days_rest = (today - last_date).days
+
+                    ip_str = str((last_start.get('stat') or {}).get(
+                        'inningsPitched', '0') or '0')
+                    try:
+                        parts   = ip_str.split('.')
+                        full    = int(parts[0])
+                        thirds  = int(parts[1]) if len(parts) > 1 else 0
+                        last_ip = round(full + thirds / 3, 2)
+                    except (ValueError, IndexError):
+                        last_ip = 0.0
+
+                    # Base rest signal
+                    if days_rest >= 5:
+                        rest_signal = 2.0
+                    elif days_rest == 4:
+                        rest_signal = 0.0
+                    elif days_rest == 3:
+                        rest_signal = -1.5
+                    else:
+                        rest_signal = -2.5
+
+                    # Workload modifier
+                    if last_ip >= 7.0:
+                        rest_signal += 1.0
+                    elif 0 < last_ip <= 3.0:
+                        rest_signal -= 1.0
+
+                    entry_data = {
+                        'days_rest':   days_rest,
+                        'last_ip':     last_ip,
+                        'rest_signal': float(np.clip(rest_signal, -3.0, 3.0)),
+                        'last_date':   last_start['date'][:10],
+                    }
+                    result[last] = entry_data
+                    result[name] = entry_data
+
+                except Exception:
+                    continue
+
+        return result
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=600)
 def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:
     """

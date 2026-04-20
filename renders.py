@@ -513,8 +513,13 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     if has_form:
         disp['Form'] = disp['_form_label'].fillna('—')
 
-    lbl          = {'Hit_Score':'🎯 Hit','Single_Score':'1️⃣ Single',
-                    'XB_Score':'🔥 XB','HR_Score':'💣 HR'}
+    lbl = {
+        'Hit_Score':   '🎯 Hit',
+        'Single_Score':'1️⃣ Single',
+        'XB_Score':    '🔥 XB',
+        'HR_Score':    '💣 HR',
+        'HRR_Score':   '🔴 H+R+RBI',
+    }
     active       = lbl.get(sc_base, 'Score')
     active_label = (active + ' ⛅') if (use_gc and sc_gc in filtered_df.columns) else active
 
@@ -549,8 +554,6 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         cols['Form'] = 'Form'
 
     # ── Profile mismatch column ────────────────────────────────────────────────
-    # Plain-text label that renders cleanly in st.dataframe()
-    # Shows for Single and XB targets — blank for Hit and HR
     sc_base_for_profile = filters.get('score_col_base',
                                       filters['score_col'].replace('_gc',''))
     if sc_base_for_profile in ('Single_Score', 'XB_Score'):
@@ -564,7 +567,7 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
                     if xb - si >=  7:  return "⚡ XB Lean"
                     if hr - si >= 15:  return "💣 Power"
                     return "✅ Clean"
-                else:  # XB_Score
+                else:
                     if hr - xb >= 12:  return "💣 HR Profile"
                     return "✅ Clean"
             except Exception:
@@ -572,8 +575,6 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         disp['Profile'] = disp.apply(_profile_label, axis=1)
 
     # ── Prop odds columns ──────────────────────────────────────────────────────
-    # TB line + under odds on every target (quick reference for any under prop)
-    # HR odds only when the active target is HR (over side context)
     has_props = 'prop_tb_line' in disp.columns and disp['prop_tb_line'].astype(bool).any()
     if has_props:
         cols['prop_tb_line']       = 'TB Line'
@@ -581,6 +582,23 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         cols['prop_tb_over_odds']  = 'TB Over'
         if sc_base == 'HR_Score':
             cols['prop_hr_odds'] = 'HR Odds'
+
+    # ── BvP columns ───────────────────────────────────────────────────────────
+    # Show career stats vs today's specific pitcher when available.
+    # bvp_conf tells users how reliable the sample is (0–1, shown as AB count).
+    has_bvp = 'bvp_ab' in disp.columns and disp['bvp_ab'].notna().any()
+    if has_bvp:
+        cols['bvp_ab']  = 'BvP AB'
+        cols['bvp_avg'] = 'BvP AVG'
+        cols['bvp_ops'] = 'BvP OPS'
+        cols['bvp_hr']  = 'BvP HR'
+
+    # ── Splits column ─────────────────────────────────────────────────────────
+    # Batter's season AVG vs this pitcher's hand (L/R)
+    has_splits = 'split_avg' in disp.columns and disp['split_avg'].notna().any()
+    if has_splits:
+        cols['split_avg'] = 'Split AVG'
+        cols['split_ops'] = 'Split OPS'
 
     statcast_cols = {'Barrel%':'Barrel%','HH%':'HH%','xBA':'xBA',
                      'xSLG':'xSLG','AvgEV':'AvgEV','maxEV':'maxEV'}
@@ -611,7 +629,6 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         out_df    = out_df.copy()       # decouple before mutation
         out_df.insert(insert_at, 'Tier', tier_vals)
 
-    # Text-only columns that must never receive a numeric format string
     _text_cols = {'Tier', 'Profile', 'Form', 'Pos', 'Market Edge',
                   'TB Line', 'TB Under', 'TB Over', 'HR Odds', 'P.Grd',
                   'Batter', 'Team', 'Pitcher'}
@@ -628,8 +645,14 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
             fmt[cn] = "{:+.2f}%"
         elif cn in ['Park Δ','Cond Δ']:
             fmt[cn] = "{:+.1f}"
-        elif cn in ['AVG','xBA','xSLG']:
+        elif cn in ['AVG','xBA','xSLG','BvP AVG','Split AVG']:
             fmt[cn] = "{:.3f}"
+        elif cn in ['BvP OPS','Split OPS']:
+            fmt[cn] = "{:.3f}"
+        elif cn == 'BvP AB':
+            fmt[cn] = "{:.0f}"
+        elif cn == 'BvP HR':
+            fmt[cn] = "{:.0f}"
         elif cn in ['AvgEV','maxEV']:
             fmt[cn] = "{:.1f}"
         elif any(e in cn for e in ['🎯','1️⃣','🔥','💣','Base']) and 'Prob' not in cn:
@@ -652,6 +675,12 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
         ('vsPit','RdYlGn',-10,10),
         ('Barrel%','Greens',0,20),  ('HH%','Greens',20,60),
         ('AvgEV','Greens',85,100),
+        # BvP — green = good history vs this pitcher
+        ('BvP AVG', 'RdYlGn', 0.150, 0.400),
+        ('BvP OPS', 'RdYlGn', 0.400, 1.200),
+        # Splits — season avg vs pitcher hand
+        ('Split AVG','RdYlGn', 0.150, 0.380),
+        ('Split OPS','RdYlGn', 0.500, 1.100),
     ]:
         if cn in out_df.columns:
             try:
@@ -705,6 +734,22 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
                 help="⚡ EDGE = model favours under more than market. "
                      "✅ CONFIRMED = both agree. 🔄 CONTRARIAN = market more bullish on under than model."
             )
+        # BvP columns
+        for bvp_col, bvp_fmt, bvp_help in [
+            ('BvP AB',  "%d",    "Career at-bats vs today's specific pitcher. ≥15=high confidence · 5-14=partial"),
+            ('BvP AVG', "%.3f",  "Career batting average vs today's starting pitcher. >.280 = historically owns this pitcher"),
+            ('BvP OPS', "%.3f",  "Career OPS vs today's starting pitcher. Best H+R+RBI predictor"),
+            ('BvP HR',  "%d",    "Career home runs vs today's starting pitcher"),
+        ]:
+            if bvp_col in out_df.columns:
+                col_cfg[bvp_col] = CC.NumberColumn(bvp_col, format=bvp_fmt, help=bvp_help)
+        # Splits columns
+        for sp_col, sp_help in [
+            ('Split AVG', "Batter's season AVG vs this pitcher's hand (L/R). Current-season performance."),
+            ('Split OPS', "Batter's season OPS vs this pitcher's hand."),
+        ]:
+            if sp_col in out_df.columns:
+                col_cfg[sp_col] = CC.NumberColumn(sp_col, format="%.3f", help=sp_help)
     except Exception:
         col_cfg = {}
 

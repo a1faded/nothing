@@ -984,7 +984,7 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
     except Exception:
         col_cfg = {}
 
-    st.dataframe(styled, use_container_width=True,
+    st.dataframe(styled, width="stretch",
                  column_config=col_cfg or None, hide_index=False)
 
     # Legend
@@ -1156,7 +1156,7 @@ def under_page(df: pd.DataFrame, filters_base: dict):
             if display_rows:
                 st.dataframe(
                     pd.DataFrame(display_rows),
-                    use_container_width=True, hide_index=True
+                    width="stretch", hide_index=True
                 )
 
     # ── TB line auto-suggest from prop odds ────────────────────────────────────

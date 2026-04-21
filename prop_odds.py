@@ -30,6 +30,7 @@ Player list note:
   No additional name matching required.
 """
 
+import os
 import streamlit as st
 import pandas as pd
 import requests
@@ -40,15 +41,25 @@ from datetime import date
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-RAPIDAPI_KEY  = "aea0b33de0mshbca63a26bd3e2eap110846jsn73cd64e0881d"
 RAPIDAPI_HOST = "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com"
 ODDS_URL      = f"https://{RAPIDAPI_HOST}/getMLBBettingOdds"
 
-HEADERS = {
-    "x-rapidapi-key":  RAPIDAPI_KEY,
-    "x-rapidapi-host": RAPIDAPI_HOST,
-    "Content-Type":    "application/json",
-}
+
+def _get_rapidapi_key() -> str:
+    try:
+        if "rapidapi_key" in st.secrets:
+            return str(st.secrets["rapidapi_key"]).strip()
+    except Exception:
+        pass
+    return os.getenv("RAPIDAPI_KEY", "").strip()
+
+
+def _build_headers() -> dict:
+    return {
+        "x-rapidapi-key": _get_rapidapi_key(),
+        "x-rapidapi-host": RAPIDAPI_HOST,
+        "Content-Type": "application/json",
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,9 +79,9 @@ def american_to_implied(odds_str: str) -> float:
         if odds == 0:
             return 0.0
         if odds > 0:
-            return round(100 / (odds + 100), 1)
+            return round((100 / (odds + 100)) * 100, 1)
         else:
-            return round(abs(odds) / (abs(odds) + 100), 1) * 100
+            return round((abs(odds) / (abs(odds) + 100)) * 100, 1)
     except (ValueError, TypeError):
         return 0.0
 
@@ -120,7 +131,10 @@ def fetch_player_props(game_date: str | None = None) -> dict:
             "playerProps": "true",
             "itemFormat":  "map",
         }
-        resp = requests.get(ODDS_URL, headers=HEADERS, params=params, timeout=12)
+        headers = _build_headers()
+        if not headers.get("x-rapidapi-key"):
+            return {}
+        resp = requests.get(ODDS_URL, headers=headers, params=params, timeout=12)
         if resp.status_code != 200:
             return {}
 

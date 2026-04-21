@@ -147,6 +147,35 @@ def _profile_badge(row: pd.Series, target_sc: str) -> str:
     return badge
 
 
+def render_source_status_panel(status_map: dict):
+    if not status_map:
+        return
+    labels = {
+        'matchups_csv': 'Matchups',
+        'pitcher_context': 'Pitchers',
+        'game_conditions': 'Game Cond',
+        'quality_starts': 'QS',
+        'batting_order': 'Lineups',
+        'recent_form': 'Form',
+        'pitcher_handedness': 'Handedness',
+        'statcast': 'Statcast',
+        'bvp_splits': 'BvP/Splits',
+        'prop_odds': 'Prop Odds',
+    }
+    color_map = {'loaded': 'var(--hit)', 'empty': 'var(--xb)', 'missing': 'var(--hr)', 'unavailable': 'var(--hr)'}
+    parts = []
+    for key, label in labels.items():
+        if key not in status_map:
+            continue
+        state = status_map[key]
+        color = color_map.get(state, 'var(--muted)')
+        parts.append(
+            f'<span style="display:inline-flex;align-items:center;gap:.35rem;margin:.15rem .4rem .15rem 0;padding:.25rem .55rem;border:1px solid rgba(255,255,255,.08);border-radius:999px;background:rgba(255,255,255,.03);font-size:.7rem;color:var(--text)"><span style="width:.48rem;height:.48rem;border-radius:50%;background:{color};display:inline-block"></span>{label}: {state}</span>'
+        )
+    if parts:
+        st.markdown('<div style="margin:.35rem 0 .65rem 0"><div style="font-size:.74rem;color:var(--muted);margin-bottom:.25rem">Source health</div>' + ''.join(parts) + '</div>', unsafe_allow_html=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -433,7 +462,7 @@ def render_game_conditions_panel(slate_df: pd.DataFrame, filters: dict,
             unsafe_allow_html=True)
         return
 
-    gc_sc_col = sc + '_gc'
+    gc_sc_col = sc if sc.endswith("_gc") else sc + "_gc"
     if gc_sc_col not in slate_df.columns:
         return
 
@@ -1046,7 +1075,7 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     except Exception:
         col_cfg = {}
 
-    st.dataframe(styled, use_container_width=True, column_config=col_cfg or None,
+    st.dataframe(styled, width="stretch", column_config=col_cfg or None,
                  hide_index=False)
 
     LG        = CONFIG
@@ -1495,7 +1524,7 @@ def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col
                 alt.Y('count()', title='Players', axis=axis_cfg),
                 tooltip=['count()']
             ).properties(title=title_cfg(f'{score_col} Distribution'), width=300, height=200)
-            st.altair_chart(ch.configure_view(strokeWidth=0), use_container_width=True)
+            st.altair_chart(ch.configure_view(strokeWidth=0), width="stretch")
 
         with c2:
             if not filtered_df.empty:
@@ -1508,7 +1537,7 @@ def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col
                              alt.Tooltip(score_col, format='.1f'),
                              'total_hit_prob','p_k','p_hr','pitch_grade']
                 ).properties(title=title_cfg('Hit Prob vs K Risk'), width=300, height=200)
-                st.altair_chart(ch2.configure_view(strokeWidth=0), use_container_width=True)
+                st.altair_chart(ch2.configure_view(strokeWidth=0), width="stretch")
 
         if not filtered_df.empty and len(filtered_df) <= 30:
             st.markdown("**Individual Score Breakdowns**")
@@ -1537,7 +1566,7 @@ def render_visualizations(df: pd.DataFrame, filtered_df: pd.DataFrame, score_col
                     tooltip=['Batter', alt.Tooltip(f'{sc}:Q', format='.1f', title='Score')]
                 ).properties(title=title_cfg(label), width=250, height=180)
                 with [r1c1, r1c2, r2c1, r2c2][i]:
-                    st.altair_chart(ch_s.configure_view(strokeWidth=0), use_container_width=True)
+                    st.altair_chart(ch_s.configure_view(strokeWidth=0), width="stretch")
 
         if not filtered_df.empty:
             ts = filtered_df.groupby('Team').agg(

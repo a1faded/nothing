@@ -9,6 +9,8 @@ New in V7:
     passed into compute_scores()
 """
 
+import logging
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime
@@ -37,6 +39,8 @@ from engine import (compute_metrics, compute_scores, compute_game_condition_scor
 from helpers import should_auto_invalidate
 
 inject_css()
+
+LOGGER = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -205,23 +209,54 @@ def _merge_signal_metadata(df, order_map: dict, form_map: dict,
     return df
 
 
-def _fetch_signal_data() -> tuple[dict, dict, dict]:
+def _fetch_signal_data() -> tuple[dict, dict, dict, dict]:
     """
-    Fetch all three new signal dicts in parallel-ish order.
-    Returns (order_map, form_map, handedness_map).
-    Any failure returns {} for that signal — graceful degradation.
+    Fetch signal dicts independently so one API failure doesn't wipe out all three.
+    Returns (order_map, form_map, handedness_map, status_map).
     """
     order_map, form_map, handedness_map = {}, {}, {}
+    status_map = {
+        'batting_order': 'unavailable',
+        'recent_form': 'unavailable',
+        'pitcher_handedness': 'unavailable',
+    }
     try:
-        from mlb_api import (get_batting_order_map,
-                             get_recent_batting_form,
-                             get_pitcher_handedness_map)
-        order_map      = get_batting_order_map()
-        form_map       = get_recent_batting_form(days=7)
-        handedness_map = get_pitcher_handedness_map()
-    except Exception:
-        pass
-    return order_map, form_map, handedness_map
+        from mlb_api import get_batting_order_map
+        order_map = get_batting_order_map() or {}
+        status_map['batting_order'] = 'loaded' if order_map else 'empty'
+    except Exception as exc:
+        LOGGER.warning('batting_order signal unavailable: %s', exc)
+
+    try:
+        from mlb_api import get_recent_batting_form
+        form_map = get_recent_batting_form(days=7) or {}
+        status_map['recent_form'] = 'loaded' if form_map else 'empty'
+    except Exception as exc:
+        LOGGER.warning('recent_form signal unavailable: %s', exc)
+
+    try:
+        from mlb_api import get_pitcher_handedness_map
+        handedness_map = get_pitcher_handedness_map() or {}
+        status_map['pitcher_handedness'] = 'loaded' if handedness_map else 'empty'
+    except Exception as exc:
+        LOGGER.warning('pitcher_handedness signal unavailable: %s', exc)
+
+    return order_map, form_map, handedness_map, status_map
+
+
+def _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status: dict, df: pd.DataFrame | None = None) -> dict:
+    status = {
+        'matchups_csv': 'loaded' if raw_df is not None and not raw_df.empty else 'missing',
+        'pitcher_context': 'loaded' if pitcher_df is not None and not pitcher_df.empty else 'missing',
+        'game_conditions': 'loaded' if game_cond is not None and not game_cond.empty else 'missing',
+        'quality_starts': 'loaded' if qs_df is not None and not qs_df.empty else 'missing',
+    }
+    status.update(signal_status or {})
+    if df is not None:
+        status['statcast'] = 'loaded' if any(c in df.columns and df[c].notna().any() for c in ['Barrel%', 'HH%', 'xBA']) else 'empty'
+        status['bvp_splits'] = 'loaded' if any(c in df.columns and df[c].notna().any() for c in ['bvp_ab', 'split_avg', 'pitcher_split_avg']) else 'empty'
+        status['prop_odds'] = 'loaded' if any(c in df.columns and df[c].notna().any() for c in ['prop_tb_under_pct', 'prop_hr_pct']) else 'empty'
+    return status
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,7 +282,7 @@ def main_page():
         filters = build_filters(raw_df)
 
         # Fetch signal data (batting order, form, handedness)
-        order_map, form_map, handedness_map = _fetch_signal_data()
+        order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
 
         df = _build_scored_df(
             raw_df, pitcher_df, game_cond, qs_df,
@@ -263,6 +298,7 @@ def main_page():
         df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
         df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
         df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+        st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
 
     # ── Apply confirmed lineup filter if toggled ──────────────────────────────
     # Uses get_confirmed_game_abbrs() which derives confirmation from
@@ -310,6 +346,8 @@ def main_page():
     filtered_df = apply_filters(df, filters)
 
     render_stat_bar(df)
+    from renders import render_source_status_panel
+    render_source_status_panel(st.session_state.get("source_status", {}))
     render_pitcher_landscape(pitcher_df, df)
     render_park_notice(slate_df, filters)
     render_game_conditions_panel(slate_df, filters, game_cond, qs_df)
@@ -407,7 +445,7 @@ def main():
             st.error("❌ Could not load Matchups data.")
         else:
             with st.spinner("Loading slate data…"):
-                order_map, form_map, handedness_map = _fetch_signal_data()
+                order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
                 df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
                                       use_park=True, use_gc=True,
                                       order_map=order_map, form_map=form_map,
@@ -417,6 +455,7 @@ def main():
                 df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
                 df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
                 df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+                st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
             filters = {'use_gc':True,'use_park':True,
                        'score_col':'Hit_Score','score_col_base':'Hit_Score'}
             player_profile_page(df, player_id_map, filters,
@@ -430,7 +469,7 @@ def main():
             st.error("❌ Could not load Matchups data.")
         else:
             with st.spinner("Loading slate data…"):
-                order_map, form_map, handedness_map = _fetch_signal_data()
+                order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
                 df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
                                       use_park=True, use_gc=True,
                                       order_map=order_map, form_map=form_map,
@@ -440,17 +479,19 @@ def main():
                 df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
                 df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
                 df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+                st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
             under_page(df, filters_base={})
 
     elif page == "⚡ Parlay Builder":
         if raw_df is None:
             st.error("❌ Could not load data for Parlay Builder.")
         else:
-            order_map, form_map, handedness_map = _fetch_signal_data()
+            order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
             df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
                                   use_park=True, use_gc=True,
                                   order_map=order_map, form_map=form_map,
                                   handedness_map=handedness_map)
+            st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
             excl = st.session_state.get('excluded_players', [])
             if excl:
                 df = df[~df['Batter'].isin(excl)]

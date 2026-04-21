@@ -122,21 +122,30 @@ def get_confirmed_game_abbrs() -> set:
             confirmed.add((away_abbr, home_abbr))
 
     return confirmed
+
+
+@st.cache_data(ttl=300)
+def get_confirmed_lineup(game_id) -> dict:
     if not _STATSAPI_OK or not game_id:
-        return {'away':[],'home':[]}
+        return {'away': [], 'home': []}
     try:
         bd = statsapi.boxscore_data(game_id)
+
         def _parse(side):
             out = []
-            for b in bd.get(f'{side}Batters',[]):
-                raw = b.get('battingOrder','')
+            for b in bd.get(f'{side}Batters', []):
+                raw = b.get('battingOrder', '')
                 if raw and str(raw).isdigit() and int(raw) > 0:
-                    out.append({'name':b.get('name',''),'position':b.get('position',''),
-                                'order':int(raw)//100})
+                    out.append({
+                        'name': b.get('name', ''),
+                        'position': b.get('position', ''),
+                        'order': int(raw) // 100,
+                    })
             return sorted(out, key=lambda x: x['order'])
-        return {'away':_parse('away'),'home':_parse('home')}
+
+        return {'away': _parse('away'), 'home': _parse('home')}
     except Exception:
-        return {'away':[],'home':[]}
+        return {'away': [], 'home': []}
 
 
 # ── BATTING ORDER MAP (NEW) ───────────────────────────────────────────────────
@@ -685,6 +694,7 @@ def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:
                 '2B':   _i(s.get('doubles',    0)),
                 '3B':   _i(s.get('triples',    0)),
                 'HR':   _i(s.get('homeRuns',   0)),
+                'R':    _i(s.get('runs',       0)),
                 'RBI':  _i(s.get('rbi',        0)),
                 'BB':   _i(s.get('baseOnBalls',0)),
                 'K':    _i(s.get('strikeOuts', 0)),

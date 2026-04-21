@@ -15,6 +15,13 @@ from datetime import date, datetime
 from io import StringIO
 from config import CONFIG, PARK_TO_TEAM, NICK_TO_ABBR
 
+_TEAM_ABBR_ALIASES = {"WAS": "WSH", "SDP": "SD", "KCR": "KC", "CHW": "CWS", "SFG": "SF", "TBR": "TB"}
+
+
+def _normalize_team_abbr(value: str) -> str:
+    value = str(value or "").strip()
+    return _TEAM_ABBR_ALIASES.get(value, value)
+
 
 @st.cache_data(ttl=CONFIG['cache_ttl'])
 def _fetch_csv(url: str, label: str):
@@ -248,14 +255,14 @@ def load_pitcher_qs():
         return None
     df['qs_prob']   = _clean_prob_col(df['Prob'])
     df['last_name'] = df['Name'].astype(str).str.split().str[-1]
-    df['home_team'] = df['Park'].astype(str).str.strip() if 'Park' in df.columns else ''
+    df['home_team'] = df['Park'].astype(str).str.strip().map(_normalize_team_abbr) if 'Park' in df.columns else ''
     return df[['last_name','home_team','qs_prob']].reset_index(drop=True)
 
 
 def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFrame:
     df = df.copy()
     df['_home_nick'] = df['Game'].astype(str).str.split(' @ ').str[-1].str.strip()
-    df['_home_abbr'] = df['_home_nick'].map(NICK_TO_ABBR).fillna('')
+    df['_home_abbr'] = df['_home_nick'].map(NICK_TO_ABBR).fillna('').map(_normalize_team_abbr)
 
     defaults = {
         'gc_hr4':    CONFIG['gc_hr4_anchor'],
@@ -281,7 +288,7 @@ def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFra
     if pitcher_qs is not None and not pitcher_qs.empty:
         qs_lookup = pitcher_qs[['last_name', 'home_team', 'qs_prob']].copy()
         qs_lookup['last_name'] = qs_lookup['last_name'].astype(str).str.strip()
-        qs_lookup['home_team'] = qs_lookup['home_team'].astype(str).str.strip()
+        qs_lookup['home_team'] = qs_lookup['home_team'].astype(str).str.strip().map(_normalize_team_abbr)
         qs_lookup = qs_lookup.drop_duplicates(subset=['last_name', 'home_team'], keep='last')
 
         df['Pitcher'] = df['Pitcher'].astype(str).str.strip()
@@ -289,7 +296,8 @@ def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFra
             qs_lookup,
             left_on=['Pitcher', '_home_abbr'],
             right_on=['last_name', 'home_team'],
-            how='left'
+            how='left',
+            validate='m:1',
         )
         df['gc_qs'] = df['qs_prob'].fillna(CONFIG['gc_qs_anchor'])
         df.drop(columns=['last_name', 'home_team', 'qs_prob'], inplace=True, errors='ignore')

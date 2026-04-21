@@ -30,6 +30,7 @@ All data is joined to the df by MLBAM player ID — no name matching needed.
 Missing data (no history, API failure) → NaN columns → neutral in scoring.
 """
 
+import os
 import streamlit as st
 import pandas as pd
 import requests
@@ -41,12 +42,23 @@ from datetime import date
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HOST    = "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com"
-_KEY     = "aea0b33de0mshbca63a26bd3e2eap110846jsn73cd64e0881d"
-_HEADERS = {
-    "x-rapidapi-key":  _KEY,
-    "x-rapidapi-host": _HOST,
-    "Content-Type":    "application/json",
-}
+
+
+def _get_rapidapi_key() -> str:
+    try:
+        if "rapidapi_key" in st.secrets:
+            return str(st.secrets["rapidapi_key"]).strip()
+    except Exception:
+        pass
+    return os.getenv("RAPIDAPI_KEY", "").strip()
+
+
+def _headers() -> dict:
+    return {
+        "x-rapidapi-key": _get_rapidapi_key(),
+        "x-rapidapi-host": _HOST,
+        "Content-Type": "application/json",
+    }
 _BVP_URL    = f"https://{_HOST}/getMLBBatterVsPitcher"
 _SPLITS_URL = f"https://{_HOST}/getMLBSplits"
 
@@ -99,7 +111,7 @@ def _fetch_bvp_raw(batter_mlbam: int) -> dict:
     try:
         resp = requests.get(
             _BVP_URL,
-            headers=_HEADERS,
+            headers=_headers(),
             params={"playerID": str(batter_mlbam), "playerRole": "batting"},
             timeout=10,
         )
@@ -173,7 +185,7 @@ def get_splits(player_mlbam: int, split_type: str = "batting") -> dict:
     try:
         resp = requests.get(
             _SPLITS_URL,
-            headers=_HEADERS,
+            headers=_headers(),
             params={
                 "playerID":  str(player_mlbam),
                 "splitType": split_type,
@@ -222,9 +234,9 @@ def build_bvp_map(df: pd.DataFrame,
     so repeated calls (e.g. sidebar filter changes) don't re-hit the API.
     """
     result: dict[int, dict] = {}
-    for _, row in df.iterrows():
-        batter = row.get("Batter", "")
-        batter_id  = player_id_map.get(batter)
+    unique_batters = tuple(dict.fromkeys(str(b) for b in df.get("Batter", pd.Series(dtype=str)).dropna().tolist()))
+    for batter in unique_batters:
+        batter_id = player_id_map.get(batter)
         pitcher_id = pitcher_id_map.get(batter)
         if not batter_id or not pitcher_id:
             continue

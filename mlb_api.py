@@ -10,6 +10,8 @@ New functions:
 from __future__ import annotations
 import streamlit as st
 import pandas as pd
+import numpy as np
+import logging
 from datetime import date, timedelta
 from typing import Optional
 
@@ -18,6 +20,8 @@ try:
     _STATSAPI_OK = True
 except ImportError:
     _STATSAPI_OK = False
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _statsapi_available() -> bool:
@@ -210,22 +214,34 @@ def get_batting_order_map() -> dict:
 @st.cache_data(ttl=3600)
 def get_pitcher_handedness_map() -> dict:
     """
-    {pitcher_last_name: 'L' or 'R'} for today's probable starters.
-    Used by engine for platoon advantage adjustment.
+    Returns a handedness map keyed by full pitcher name, plus unique short-name aliases.
     """
     if not _STATSAPI_OK:
         return {}
-    games, result, seen = get_today_schedule(), {}, set()
+    games = get_today_schedule()
+    full_map, alias_counts = {}, {}
     for g in games:
         for key in ('away_probable_pitcher','home_probable_pitcher'):
             name = (g.get(key) or '').strip()
-            if not name or name in seen:
+            if not name or name in full_map:
                 continue
-            seen.add(name)
-            last = name.split()[-1]
             hand = _lookup_pitcher_hand(name)
             if hand:
-                result[last] = hand
+                full_map[name] = hand
+                alias = name.split()[-1]
+                alias_counts[alias] = alias_counts.get(alias, 0) + 1
+                if len(name.split()) >= 2 and name.split()[-1].endswith('.'):
+                    alias2 = ' '.join(name.split()[-2:])
+                    alias_counts[alias2] = alias_counts.get(alias2, 0) + 1
+    result = dict(full_map)
+    for name, hand in full_map.items():
+        alias = name.split()[-1]
+        if alias_counts.get(alias) == 1:
+            result[alias] = hand
+        if len(name.split()) >= 2 and name.split()[-1].endswith('.'):
+            alias2 = ' '.join(name.split()[-2:])
+            if alias_counts.get(alias2) == 1:
+                result[alias2] = hand
     return result
 
 
@@ -321,12 +337,12 @@ def _lookup_player_mlbam(full_name: str) -> int | None:
 # ── Tank01 player list lookup (module-level, loaded once) ─────────────────────
 # Covers all 2,603 MLB players + pitchers. Zero API cost per lookup.
 # Falls back to statsapi only for call-ups not yet in the list.
-_TANK_PLAYER_MAP:      dict[str, int] = {}
-_TANK_PLAYER_MAP_LAST: dict[str, int] = {}
+_TANK_PLAYER_MAP: dict[str, int] = {}
+_TANK_PLAYER_MAP_LAST_UNIQUE: dict[str, int] = {}
 
 def _load_tank_player_list():
     """Load tank_player_list.json into module-level dicts for fast name→ID lookup."""
-    global _TANK_PLAYER_MAP, _TANK_PLAYER_MAP_LAST
+    global _TANK_PLAYER_MAP, _TANK_PLAYER_MAP_LAST_UNIQUE
     import json, os
     path = os.path.join(os.path.dirname(__file__), "tank_player_list.json")
     if not os.path.exists(path):
@@ -335,7 +351,7 @@ def _load_tank_player_list():
         data    = json.load(open(path))
         players = data.get("body", [])
         full_map: dict[str, int] = {}
-        last_map: dict[str, int] = {}
+        last_buckets: dict[str, list[int]] = {}
         for p in players:
             name = (p.get("longName") or "").strip()
             pid  = p.get("playerID")
@@ -347,10 +363,9 @@ def _load_tank_player_list():
                 continue
             full_map[name.lower()] = pid_int
             last = name.split()[-1].lower()
-            if last not in last_map:    # first occurrence wins for duplicates
-                last_map[last] = pid_int
-        _TANK_PLAYER_MAP      = full_map
-        _TANK_PLAYER_MAP_LAST = last_map
+            last_buckets.setdefault(last, []).append(pid_int)
+        _TANK_PLAYER_MAP = full_map
+        _TANK_PLAYER_MAP_LAST_UNIQUE = {k:v[0] for k,v in last_buckets.items() if len(set(v)) == 1}
     except Exception:
         pass
 
@@ -614,8 +629,12 @@ def get_pitcher_rest_map() -> dict:
                         'rest_signal': float(np.clip(rest_signal, -3.0, 3.0)),
                         'last_date':   last_start['date'][:10],
                     }
-                    result[last] = entry_data
                     result[name] = entry_data
+                    if last not in result:
+                        result[last] = entry_data
+                    if len(name.split()) >= 2 and name.split()[-1].endswith('.'):
+                        alias2 = ' '.join(name.split()[-2:])
+                        result.setdefault(alias2, entry_data)
 
                 except Exception:
                     continue
@@ -659,6 +678,12 @@ def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:
         return (name_to_abbr.get(two_word)
                 or name_to_abbr.get(last_word)
                 or full_name[:3].upper())
+
+    def _i(val):
+        try:
+            return int(float(val))
+        except (TypeError, ValueError):
+            return 0
 
     year = date.today().year
     try:
@@ -704,7 +729,8 @@ def get_player_game_log(player_id: int, last_n: int = 15) -> pd.DataFrame:
                 break
 
         return pd.DataFrame(rows) if rows else pd.DataFrame()
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning('get_player_game_log failed for player_id=%s season=%s: %s', player_id, year, exc)
         return pd.DataFrame()
 
 

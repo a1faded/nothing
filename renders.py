@@ -372,36 +372,22 @@ def render_pitcher_landscape(pitcher_df, df: pd.DataFrame):
                         unsafe_allow_html=True)
             return
 
-        today_pitchers = df['Pitcher'].astype(str).dropna().unique()
-        rows_html      = ""
+        rows_html = ""
+        pitch_lookup = pitcher_df.drop_duplicates(subset=['pitcher_key','park'], keep='last').set_index(['pitcher_key','park']) if not pitcher_df.empty else pd.DataFrame()
 
-        # Duplicate last names can exist in the pitcher CSV inputs.
-        # For the landscape panel, only use unambiguous pitcher rows; otherwise
-        # fall back to neutral display values instead of crashing on Series/DataFrame formatting.
-        if '_ambiguous' in pitcher_df.columns:
-            landscape_df = pitcher_df[~pitcher_df['_ambiguous']].copy()
-        else:
-            vc = pitcher_df['last_name'].astype(str).value_counts()
-            landscape_df = pitcher_df.loc[pitcher_df['last_name'].astype(str).map(vc).fillna(0).eq(1)].copy()
-        pm = landscape_df.drop_duplicates(subset=['last_name']).set_index('last_name') if not landscape_df.empty else pd.DataFrame()
+        display_rows = df[['Pitcher','_pitcher_key','_home_abbr','_pitcher_full_name','_pitcher_team','pitch_grade','hit8_prob','hr2_prob','walk3_prob','pitch_hit_mult','pitch_hr_mult']].drop_duplicates()
 
-        for p in sorted(today_pitchers):
-            if not pm.empty and p in pm.index:
-                r       = pm.loc[p]
-                grade_h = grade_pill(str(r.get('pitch_grade', 'B')))
-                name, team = r.get('full_name', p), r.get('team', '—')
-                hit_val    = _fmt_pct(r.get('hit8_prob'), CONFIG['pitcher_hit_neutral'])
-                hr_val     = _fmt_pct(r.get('hr2_prob'), CONFIG['pitcher_hr_neutral'])
-                wk_val     = _fmt_pct(r.get('walk3_prob'), CONFIG['pitcher_walk_neutral'])
-                hm_val     = _fmt_mult(r.get('pitch_hit_mult'), 1.0)
-                hrm_val    = _fmt_mult(r.get('pitch_hr_mult'), 1.0)
-            else:
-                grade_h = grade_pill('B')
-                name, team = p, "—"
-                hit_val = f"{CONFIG['pitcher_hit_neutral']:.1f}% *"
-                hr_val  = f"{CONFIG['pitcher_hr_neutral']:.1f}% *"
-                wk_val  = f"{CONFIG['pitcher_walk_neutral']:.1f}% *"
-                hm_val  = hrm_val = "1.000×"
+        for _, disp in display_rows.sort_values(['Pitcher']).iterrows():
+            key = (str(disp.get('_pitcher_key') or ''), str(disp.get('_home_abbr') or ''))
+            r = pitch_lookup.loc[key] if (not pitch_lookup.empty and key in pitch_lookup.index) else disp
+            grade_h = grade_pill(str(r.get('pitch_grade', disp.get('pitch_grade', 'B'))))
+            name = r.get('full_name', disp.get('_pitcher_full_name') or disp.get('Pitcher') or '—')
+            team = r.get('team', disp.get('_pitcher_team') or '—')
+            hit_val = _fmt_pct(r.get('hit8_prob', disp.get('hit8_prob')), CONFIG['pitcher_hit_neutral'])
+            hr_val = _fmt_pct(r.get('hr2_prob', disp.get('hr2_prob')), CONFIG['pitcher_hr_neutral'])
+            wk_val = _fmt_pct(r.get('walk3_prob', disp.get('walk3_prob')), CONFIG['pitcher_walk_neutral'])
+            hm_val = _fmt_mult(r.get('pitch_hit_mult', disp.get('pitch_hit_mult')), 1.0)
+            hrm_val = _fmt_mult(r.get('pitch_hr_mult', disp.get('pitch_hr_mult')), 1.0)
 
             rows_html += f"""<tr>
               <td style="color:var(--text)">{name}</td>

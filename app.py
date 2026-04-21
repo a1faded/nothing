@@ -116,7 +116,7 @@ def _enrich_with_tank_stats(df, player_id_map: dict) -> pd.DataFrame:
         pitcher_id_map: dict[str, int] = {}
         if 'Pitcher' in df.columns and 'Batter' in df.columns:
             for _, row in df.iterrows():
-                pitcher_name = str(row.get('Pitcher', '') or '').strip()
+                pitcher_name = str(row.get('_pitcher_full_name') or row.get('Pitcher', '') or '').strip()
                 batter_name  = str(row.get('Batter',  '') or '').strip()
                 if not pitcher_name or not batter_name:
                     continue
@@ -177,8 +177,10 @@ def _merge_signal_metadata(df, order_map: dict, form_map: dict,
         df['_form_label'] = df['Batter'].apply(_label)
 
     if handedness_map:
-        df['_pitcher_hand'] = df['Pitcher'].apply(
-            lambda p: handedness_map.get(p.split()[-1]) if p else None)
+        df['_pitcher_hand'] = df.apply(
+            lambda r: handedness_map.get(r.get('_pitcher_full_name'))
+            or handedness_map.get(r.get('_pitcher_key'))
+            or handedness_map.get(r.get('Pitcher')), axis=1)
     else:
         df['_pitcher_hand'] = None
 
@@ -190,7 +192,7 @@ def _merge_signal_metadata(df, order_map: dict, form_map: dict,
     if missing_hand.any():
         try:
             from mlb_api import _lookup_pitcher_hand as _lph
-            unique_pitchers = df.loc[missing_hand, 'Pitcher'].dropna().unique()
+            unique_pitchers = df.loc[missing_hand, ['Pitcher','_pitcher_full_name']].drop_duplicates()
             hand_cache = {}
             for pitcher in unique_pitchers:
                 if pitcher and pitcher not in hand_cache:

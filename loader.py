@@ -23,6 +23,20 @@ def _normalize_team_abbr(value: str) -> str:
     return _TEAM_ABBR_ALIASES.get(value, value)
 
 
+def _build_pitcher_key(name: str) -> str:
+    parts = [x for x in str(name or '').strip().split() if x]
+    if not parts:
+        return ''
+    if len(parts) >= 2 and parts[-1].endswith('.'):
+        return ' '.join(parts[-2:])
+    return parts[-1]
+
+
+def _home_abbr_from_game(series: pd.Series) -> pd.Series:
+    home_nick = series.astype(str).str.split(' @ ').str[-1].str.strip()
+    return home_nick.map(NICK_TO_ABBR).fillna('').map(_normalize_team_abbr)
+
+
 @st.cache_data(ttl=CONFIG['cache_ttl'])
 def _fetch_csv(url: str, label: str):
     try:
@@ -129,19 +143,19 @@ def load_pitcher_data():
         d['prob_val']  = pd.to_numeric(
             d['Prob'].astype(str).str.replace('%','',regex=False).str.strip(),
             errors='coerce').fillna(0)
-        d['last_name'] = d['Name'].astype(str).str.split().str[-1]
         d['full_name'] = d['Name'].astype(str).str.strip()
+        d['pitcher_key'] = d['full_name'].map(_build_pitcher_key)
         d['team']      = d['Team'].astype(str).str.strip()
-        d['park']      = d['Park'].astype(str).str.strip() if 'Park' in d.columns else ''
-        return d[['last_name','full_name','team','park','prob_val']].rename(
+        d['park']      = d['Park'].astype(str).str.strip().map(_normalize_team_abbr) if 'Park' in d.columns else ''
+        return d[['pitcher_key','full_name','team','park','prob_val']].rename(
             columns={'prob_val': col_name})
 
     hits_c  = clean(hits_df,  'hit8_prob')
     hrs_c   = clean(hrs_df,   'hr2_prob')
     walks_c = clean(walks_df, 'walk3_prob')
 
-    merged = hits_c.merge(hrs_c,   on=['last_name','full_name','team','park'], how='outer')
-    merged = merged.merge(walks_c, on=['last_name','full_name','team','park'], how='outer')
+    merged = hits_c.merge(hrs_c,   on=['pitcher_key','full_name','team','park'], how='outer')
+    merged = merged.merge(walks_c, on=['pitcher_key','full_name','team','park'], how='outer')
 
     merged['hit8_prob']  = merged['hit8_prob'].fillna(CONFIG['pitcher_hit_neutral'])
     merged['hr2_prob']   = merged['hr2_prob'].fillna(CONFIG['pitcher_hr_neutral'])
@@ -162,9 +176,11 @@ def load_pitcher_data():
         ['A+','A','B','C'], default='D'
     )
 
-    name_counts = merged['last_name'].value_counts()
-    merged['_ambiguous'] = merged['last_name'].map(name_counts) > 1
-    return merged.drop_duplicates(subset='full_name').reset_index(drop=True)
+    key_counts = merged.groupby(['pitcher_key','park']).size().rename('n').reset_index()
+    merged = merged.merge(key_counts, on=['pitcher_key','park'], how='left')
+    merged['_ambiguous'] = merged['n'].fillna(0).gt(1)
+    merged.drop(columns=['n'], inplace=True, errors='ignore')
+    return merged.drop_duplicates(subset=['full_name','park']).reset_index(drop=True)
 
 
 def merge_pitcher_data(df: pd.DataFrame, pitcher_df) -> pd.DataFrame:
@@ -254,15 +270,17 @@ def load_pitcher_qs():
     if 'Prob' not in df.columns or 'Name' not in df.columns:
         return None
     df['qs_prob']   = _clean_prob_col(df['Prob'])
-    df['last_name'] = df['Name'].astype(str).str.split().str[-1]
+    df['full_name'] = df['Name'].astype(str).str.strip()
+    df['pitcher_key'] = df['full_name'].map(_build_pitcher_key)
     df['home_team'] = df['Park'].astype(str).str.strip().map(_normalize_team_abbr) if 'Park' in df.columns else ''
-    return df[['last_name','home_team','qs_prob']].reset_index(drop=True)
+    return df[['pitcher_key','full_name','home_team','qs_prob']].reset_index(drop=True)
 
 
 def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFrame:
     df = df.copy()
-    df['_home_nick'] = df['Game'].astype(str).str.split(' @ ').str[-1].str.strip()
-    df['_home_abbr'] = df['_home_nick'].map(NICK_TO_ABBR).fillna('').map(_normalize_team_abbr)
+    df['_home_abbr'] = _home_abbr_from_game(df['Game'])
+    if '_pitcher_key' not in df.columns:
+        df['_pitcher_key'] = df['Pitcher'].astype(str).map(_build_pitcher_key)
 
     defaults = {
         'gc_hr4':    CONFIG['gc_hr4_anchor'],
@@ -286,21 +304,23 @@ def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFra
 
     df['gc_qs'] = CONFIG['gc_qs_anchor']
     if pitcher_qs is not None and not pitcher_qs.empty:
-        qs_lookup = pitcher_qs[['last_name', 'home_team', 'qs_prob']].copy()
-        qs_lookup['last_name'] = qs_lookup['last_name'].astype(str).str.strip()
+        qs_lookup = pitcher_qs.copy()
+        if 'pitcher_key' not in qs_lookup.columns:
+            source_name = qs_lookup['full_name'] if 'full_name' in qs_lookup.columns else qs_lookup.get('last_name', '')
+            qs_lookup['pitcher_key'] = pd.Series(source_name).astype(str).map(_build_pitcher_key)
+        qs_lookup = qs_lookup[['pitcher_key', 'home_team', 'qs_prob']].copy()
+        qs_lookup['pitcher_key'] = qs_lookup['pitcher_key'].astype(str).str.strip()
         qs_lookup['home_team'] = qs_lookup['home_team'].astype(str).str.strip().map(_normalize_team_abbr)
-        qs_lookup = qs_lookup.drop_duplicates(subset=['last_name', 'home_team'], keep='last')
+        qs_lookup = qs_lookup.drop_duplicates(subset=['pitcher_key', 'home_team'], keep='last')
 
-        df['Pitcher'] = df['Pitcher'].astype(str).str.strip()
         df = df.merge(
             qs_lookup,
-            left_on=['Pitcher', '_home_abbr'],
-            right_on=['last_name', 'home_team'],
+            left_on=['_pitcher_key', '_home_abbr'],
+            right_on=['pitcher_key', 'home_team'],
             how='left',
             validate='m:1',
         )
         df['gc_qs'] = df['qs_prob'].fillna(CONFIG['gc_qs_anchor'])
-        df.drop(columns=['last_name', 'home_team', 'qs_prob'], inplace=True, errors='ignore')
+        df.drop(columns=['pitcher_key', 'home_team', 'qs_prob'], inplace=True, errors='ignore')
 
-    df.drop(columns=['_home_nick','_home_abbr'], inplace=True, errors='ignore')
     return df

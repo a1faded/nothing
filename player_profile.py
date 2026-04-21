@@ -270,8 +270,8 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
 
         # 2. Platoon Analysis
         p_hand = (
-            handedness_map.get(pitcher.split()[-1]) if pitcher and pitcher != '—' else None
-        ) or (row.get('_pitcher_hand') or None)
+            handedness_map.get(row.get('_pitcher_full_name')) if row.get('_pitcher_full_name') else None
+        ) or handedness_map.get(row.get('_pitcher_key')) or (row.get('_pitcher_hand') or None)
 
         if p_hand:
             hand_label = "Left-handed (LHP)" if p_hand == "L" else "Right-handed (RHP)"
@@ -299,7 +299,7 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
             try:
                 from mlb_api import get_pitcher_rest_map as _grm
                 _rm = _grm()
-                rest_info = _rm.get(pitcher) or _rm.get(pitcher.split()[-1])
+                rest_info = _rm.get(row.get('_pitcher_full_name')) or _rm.get(row.get('_pitcher_key')) or _rm.get(pitcher)
             except Exception:
                 pass
 

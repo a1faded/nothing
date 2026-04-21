@@ -358,26 +358,43 @@ def render_score_summary_cards(slate_df: pd.DataFrame, filters: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_pitcher_landscape(pitcher_df, df: pd.DataFrame):
+    def _fmt_pct(val, default):
+        num = pd.to_numeric(pd.Series([val]), errors='coerce').iloc[0]
+        return f"{float(num):.1f}%" if pd.notna(num) else f"{default:.1f}% *"
+
+    def _fmt_mult(val, default=1.0):
+        num = pd.to_numeric(pd.Series([val]), errors='coerce').iloc[0]
+        return f"{float(num):.3f}×" if pd.notna(num) else f"{default:.3f}×"
+
     with st.expander("⚾ Pitcher Landscape", expanded=False):
         if pitcher_df is None or pitcher_df.empty:
             st.markdown('<div class="notice notice-info">ℹ️ Pitcher CSV data unavailable.</div>',
                         unsafe_allow_html=True)
             return
 
-        today_pitchers = df['Pitcher'].unique()
-        pm             = pitcher_df.set_index('last_name')
+        today_pitchers = df['Pitcher'].astype(str).dropna().unique()
         rows_html      = ""
 
+        # Duplicate last names can exist in the pitcher CSV inputs.
+        # For the landscape panel, only use unambiguous pitcher rows; otherwise
+        # fall back to neutral display values instead of crashing on Series/DataFrame formatting.
+        if '_ambiguous' in pitcher_df.columns:
+            landscape_df = pitcher_df[~pitcher_df['_ambiguous']].copy()
+        else:
+            vc = pitcher_df['last_name'].astype(str).value_counts()
+            landscape_df = pitcher_df.loc[pitcher_df['last_name'].astype(str).map(vc).fillna(0).eq(1)].copy()
+        pm = landscape_df.drop_duplicates(subset=['last_name']).set_index('last_name') if not landscape_df.empty else pd.DataFrame()
+
         for p in sorted(today_pitchers):
-            if p in pm.index:
+            if not pm.empty and p in pm.index:
                 r       = pm.loc[p]
-                grade_h = grade_pill(str(r['pitch_grade']))
-                name, team = r['full_name'], r['team']
-                hit_val    = f"{r['hit8_prob']:.1f}%"
-                hr_val     = f"{r['hr2_prob']:.1f}%"
-                wk_val     = f"{r['walk3_prob']:.1f}%"
-                hm_val     = f"{r['pitch_hit_mult']:.3f}×"
-                hrm_val    = f"{r['pitch_hr_mult']:.3f}×"
+                grade_h = grade_pill(str(r.get('pitch_grade', 'B')))
+                name, team = r.get('full_name', p), r.get('team', '—')
+                hit_val    = _fmt_pct(r.get('hit8_prob'), CONFIG['pitcher_hit_neutral'])
+                hr_val     = _fmt_pct(r.get('hr2_prob'), CONFIG['pitcher_hr_neutral'])
+                wk_val     = _fmt_pct(r.get('walk3_prob'), CONFIG['pitcher_walk_neutral'])
+                hm_val     = _fmt_mult(r.get('pitch_hit_mult'), 1.0)
+                hrm_val    = _fmt_mult(r.get('pitch_hr_mult'), 1.0)
             else:
                 grade_h = grade_pill('B')
                 name, team = p, "—"

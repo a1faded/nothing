@@ -85,35 +85,14 @@ def _enrich_with_ids(df, player_id_map):
 
 
 def _enrich_with_prop_odds(df, player_id_map: dict) -> pd.DataFrame:
-    """Fetch today's player prop odds from Tank01 and join to df by MLBAM ID."""
+    """
+    Fetch today's player prop odds from Tank01 and join to df by MLBAM ID.
+    Adds prop_tb_* and prop_hr_* columns. Fails silently — no odds = no columns.
+    """
     try:
         from prop_odds import fetch_player_props, enrich_with_props
-        props = fetch_player_props()
+        props = fetch_player_props()          # cached 30 min
         return enrich_with_props(df, player_id_map, props)
-    except Exception:
-        return df
-
-
-def _enrich_with_tank_stats(df, player_id_map: dict) -> pd.DataFrame:
-    """
-    Fetch BvP and splits data from Tank01 and join to df.
-    Adds bvp_* and split_* columns. Fails silently on any error.
-    """
-    try:
-        from mlb_api import get_pitcher_id_map
-        from tank_stats import (build_bvp_map, build_splits_map,
-                                 enrich_with_bvp, enrich_with_splits)
-        pitcher_id_map = get_pitcher_id_map()
-        if not pitcher_id_map:
-            return df
-        bvp_map = build_bvp_map(df, player_id_map, pitcher_id_map)
-        df      = enrich_with_bvp(df, player_id_map, bvp_map)
-        batter_splits, pitcher_splits = build_splits_map(
-            df, player_id_map, pitcher_id_map)
-        df = enrich_with_splits(
-            df, player_id_map, pitcher_id_map,
-            batter_splits, pitcher_splits)
-        return df
     except Exception:
         return df
 
@@ -215,8 +194,7 @@ def main_page():
         player_id_map = _get_player_id_map(df)
         df = _enrich_with_ids(df, player_id_map)
         df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
-        df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
-        df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+        df = _enrich_with_prop_odds(df, player_id_map)   # Tank01 odds join
 
     # ── Apply confirmed lineup filter if toggled ──────────────────────────────
     # Uses get_confirmed_game_abbrs() which derives confirmation from
@@ -356,8 +334,7 @@ def main():
                 player_id_map = _get_player_id_map(df)
                 df = _enrich_with_ids(df, player_id_map)
                 df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
-                df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
-                df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+                df = _enrich_with_prop_odds(df, player_id_map)   # Tank01 odds join
             filters = {'use_gc':True,'use_park':True,
                        'score_col':'Hit_Score','score_col_base':'Hit_Score'}
             player_profile_page(df, player_id_map, filters,
@@ -378,8 +355,7 @@ def main():
                                       handedness_map=handedness_map)
                 player_id_map = _get_player_id_map(df)
                 df = _enrich_with_ids(df, player_id_map)
-                df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
-                df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+                df = _enrich_with_prop_odds(df, player_id_map)   # Tank01 odds join
             under_page(df, filters_base={})
 
     elif page == "⚡ Parlay Builder":

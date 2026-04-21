@@ -19,16 +19,15 @@ def build_filters(df: pd.DataFrame) -> dict:
     # ── Target ────────────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🎯 Betting Target")
     target_map = {
-        "🎯 Hit Score — Any Base Hit":          "hit",
-        "1️⃣ Single Score — Single Only":       "single",
-        "🔥 XB Score — Double / Triple":        "xb",
-        "💣 HR Score — Home Run":               "hr",
-        "🔴 H+R+RBI Score — Hits+Runs+RBIs":   "hrr",
+        "🎯 Hit Score — Any Base Hit":      "hit",
+        "1️⃣ Single Score — Single Only":   "single",
+        "🔥 XB Score — Double / Triple":    "xb",
+        "💣 HR Score — Home Run":            "hr",
     }
     label            = st.sidebar.selectbox("Choose Your Betting Target", list(target_map.keys()))
     filters['target']= target_map[label]
     score_col_map    = {'hit':'Hit_Score','single':'Single_Score',
-                        'xb':'XB_Score','hr':'HR_Score','hrr':'HRR_Score'}
+                        'xb':'XB_Score','hr':'HR_Score'}
     filters['score_col']      = score_col_map[filters['target']]
     filters['score_col_base'] = filters['score_col']
 
@@ -69,7 +68,6 @@ def build_filters(df: pd.DataFrame) -> dict:
         'single':("Min 1B Prob %",             "p_1b",           0.0, 30.0, 10.0),
         'xb':    ("Min XB Prob %",             "p_xb",           0.0, 12.0,  4.0),
         'hr':    ("Min HR Prob %",             "p_hr",           0.0,  8.0,  2.0),
-        'hrr':   ("Min Hit Prob % (H+R+RBI)",  "total_hit_prob", 0.0, 50.0, 15.0),
     }
     pl, pc, mn, mx, dv = min_cfg[filters['target']]
     filters['min_prob']     = st.sidebar.slider(pl, mn, mx, dv, 0.5)
@@ -205,6 +203,7 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
         # Hit/HR: no profile ranking — sort purely by score
         sc_base_for_sort = filters.get('score_col_base', sc_s.replace('_gc',''))
         is_profile_target = sc_base_for_sort in ('Single_Score', 'XB_Score')
+
         if is_profile_target and not out.empty:
             if sc_base_for_sort == 'Single_Score':
                 mismatch = pd.Series(False, index=out.index)

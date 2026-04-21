@@ -203,6 +203,9 @@ def get_pitcher_handedness_map() -> dict:
     """
     {pitcher_last_name: 'L' or 'R'} for today's probable starters.
     Used by engine for platoon advantage adjustment.
+
+    NOTE: If BallPark Pal already models handedness in their simulations,
+    set CONFIG['use_platoon'] = False to disable this overlay.
     """
     if not _STATSAPI_OK:
         return {}
@@ -218,77 +221,6 @@ def get_pitcher_handedness_map() -> dict:
             if hand:
                 result[last] = hand
     return result
-
-
-@st.cache_data(ttl=3600)
-def get_pitcher_id_map() -> dict:
-    """
-    {batter_name: pitcher_mlbam_id} — maps each batter to today's opposing starter.
-
-    Built by cross-referencing today's schedule (away/home probable pitcher)
-    with confirmed lineups to know which team's batters face which starter.
-    Used by tank_stats.py to make targeted BvP and splits API calls.
-
-    Returns {} when MLB Stats API unavailable or no schedule found.
-    """
-    if not _STATSAPI_OK:
-        return {}
-    try:
-        games  = get_today_schedule()
-        result = {}
-        for g in games:
-            away_sp_name = (g.get('away_probable_pitcher') or '').strip()
-            home_sp_name = (g.get('home_probable_pitcher') or '').strip()
-            game_id = g.get('game_id')
-            if not game_id:
-                continue
-
-            # Resolve pitcher names to MLBAM IDs
-            away_sp_id = _lookup_player_mlbam(away_sp_name) if away_sp_name else None
-            home_sp_id = _lookup_player_mlbam(home_sp_name) if home_sp_name else None
-
-            # Get confirmed lineup for this game
-            lineup = get_confirmed_lineup(game_id)
-
-            # Away batters face the HOME starter
-            if home_sp_id:
-                for b in lineup.get('away', []):
-                    name = b.get('name', '').strip()
-                    if name:
-                        result[name] = home_sp_id
-                        last = name.split()[-1]
-                        result[last] = home_sp_id   # also map last name
-
-            # Home batters face the AWAY starter
-            if away_sp_id:
-                for b in lineup.get('home', []):
-                    name = b.get('name', '').strip()
-                    if name:
-                        result[name] = away_sp_id
-                        last = name.split()[-1]
-                        result[last] = away_sp_id
-
-        return result
-    except Exception:
-        return {}
-
-
-def _lookup_player_mlbam(full_name: str) -> int | None:
-    """Resolve a player's full name to their MLBAM ID via statsapi."""
-    try:
-        players = statsapi.lookup_player(full_name)
-        if not players:
-            return None
-        # Prefer active players
-        for p in players:
-            if p.get('active') and p.get('id'):
-                return int(p['id'])
-        for p in players:
-            if p.get('id'):
-                return int(p['id'])
-    except Exception:
-        pass
-    return None
 
 
 def _lookup_pitcher_hand(full_name: str) -> str | None:

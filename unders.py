@@ -683,7 +683,6 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
                  sc,
                  'prop_tb_line','prop_tb_under_odds','prop_tb_over_odds',
                  'prop_hr_odds',
-                 'bvp_avg','bvp_ops','bvp_ab',
                  'Hit_Score','XB_Score','HR_Score',
                  'p_k','p_bb','total_hit_prob','p_1b','p_xb','p_hr',
                  'vs Grade',
@@ -710,9 +709,6 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         'PA':          'Hist PA',
         'H':           'Hist H',
         'AVG':         'Hist AVG',
-        'bvp_avg':     'BvP AVG',
-        'bvp_ops':     'BvP OPS',
-        'bvp_ab':      'BvP AB',
     }
 
     # Add market edge badge column when prop data available
@@ -773,10 +769,6 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
             fmt[cn] = "{:.3f}"
         elif cn == 'Hist PA':
             fmt[cn] = "{:.0f}"
-        elif cn in ['BvP AVG','BvP OPS']:
-            fmt[cn] = "{:.3f}"
-        elif cn == 'BvP AB':
-            fmt[cn] = "{:.0f}"
 
     styled = out_df.style.format(fmt, na_rep="—")
 
@@ -817,24 +809,6 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         try:
             styled = styled.background_gradient(
                 subset=['Hist AVG'], cmap='RdYlGn_r', vmin=0.100, vmax=0.400
-            )
-        except Exception:
-            pass
-
-    # BvP AVG: reversed — low BvP AVG vs this pitcher = good for under
-    if 'BvP AVG' in out_df.columns:
-        try:
-            styled = styled.background_gradient(
-                subset=['BvP AVG'], cmap='RdYlGn_r', vmin=0.100, vmax=0.450
-            )
-        except Exception:
-            pass
-
-    # BvP OPS: reversed — low OPS vs this pitcher = struggles here = under signal
-    if 'BvP OPS' in out_df.columns:
-        try:
-            styled = styled.background_gradient(
-                subset=['BvP OPS'], cmap='RdYlGn_r', vmin=0.300, vmax=1.100
             )
         except Exception:
             pass

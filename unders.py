@@ -45,39 +45,47 @@ from helpers import grade_pill, style_grade_cell
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_under_scores(df: pd.DataFrame,
-                         form_map:     dict | None = None,
-                         use_gc:       bool = True,
-                         pitcher_form: dict | None = None,
-                         rest_map:     dict | None = None) -> pd.DataFrame:
+                         form_map: dict | None = None,
+                         use_gc:   bool = True) -> pd.DataFrame:
     """
-    Full 8+1+1+1 layer under score computation. Vectorized throughout.
+    Full 8+1 layer under score computation. Vectorized throughout.
 
     Signal architecture:
-      Layer 1  — Primary offensive scores, GC-adjusted when use_gc=True
-      Layer 2  — K% and BB%
-      Layer 3  — Pitcher grade + recent ERA/WHIP (7-day) + days rest / last IP
-      Layer 4  — Historical matchup AVG/PA
-      Layer 5  — Recent XB rate (7-day)
-      Layer 6  — Recent hit rate (7-day cold hitter signal)
-      Layer 7  — Statcast contact quality
-      Layer 8  — vs Grade + park factor
-      Layer 9  — Game conditions suppression
-      Layer 10 — Batting order position
-      Layer 11 — Platoon split
+      Layer 1 — Primary offensive scores, GC-adjusted when use_gc=True (Fix 1)
+      Layer 2 — K% and BB% (non-contact plate appearance outcomes)
+      Layer 3 — Pitcher grade
+      Layer 4 — Historical matchup AVG/PA (BallPark Pal)
+      Layer 5 — Recent XB rate (7-day 2B+3B/G from pybaseball)
+      Layer 6 — Recent hit rate (7-day H/G — cold hitter signal for Hit Under)
+      Layer 7 — Statcast contact quality (Barrel%, HH%, AvgEV, xSLG, xBA, xwOBA)
+      Layer 8 — vs Grade + park factor (matchup context)
+      Layer 9 — Game conditions suppression (Fix 2) — pitcher/game environment today
 
-    rest_map: {pitcher_name: {days_rest, last_ip, rest_signal}} from get_pitcher_rest_map()
+    Fix 1: When use_gc=True, use Hit_Score_gc/XB_Score_gc/HR_Score_gc as the
+           primary Layer 1 inputs. These already encode park, weather, and game
+           environment from compute_game_condition_scores(). Falls back to base
+           scores if GC variants not in df.
+
+    Fix 2: Layer 9 adds a direct gc_suppression bonus from today's GC data:
+           low gc_hits20 + low gc_runs10 + high gc_k20 + high gc_qs = pitcher day.
+           For XB/HR unders: also factors in low gc_hr4.
+           Applied to all four under types, ±6 pts max.
+
+    All Statcast signals neutral (0.0) when NaN. All form signals neutral when
+    player not in map or <3 games. Hist signal neutral when PA < under_hist_min_pa.
     """
-    df           = df.copy()
-    cfg          = CONFIG
-    form_map     = form_map     or {}
-    pitcher_form = pitcher_form or {}
-    rest_map     = rest_map     or {}
+    df       = df.copy()
+    cfg      = CONFIG
+    form_map = form_map or {}
 
     for col in ['Hit_Score','Single_Score','XB_Score','HR_Score']:
         if col not in df.columns:
             df[col] = 50.0
 
-    # ── FIX 1: GC-adjusted scores as Layer 1 ─────────────────────────────────
+    # ── FIX 1: Use GC-adjusted scores as Layer 1 primary ─────────────────────
+    # GC scores incorporate park, weather, game total, and pitcher environment.
+    # Inverting GC scores gives a more accurate "how bad is this matchup today"
+    # signal than inverting base scores. Falls back gracefully when not available.
     def _gc_or_base(gc_col: str, base_col: str) -> pd.Series:
         if use_gc and gc_col in df.columns:
             return pd.to_numeric(df[gc_col], errors='coerce').fillna(
@@ -88,12 +96,16 @@ def compute_under_scores(df: pd.DataFrame,
     hit    = _gc_or_base('Hit_Score_gc',    'Hit_Score')
     xb     = _gc_or_base('XB_Score_gc',     'XB_Score')
     hr     = _gc_or_base('HR_Score_gc',     'HR_Score')
+    # Single stays as base — no GC variant changes its meaning for unders
     single = df['Single_Score'].clip(0, 100)
 
+    # ── Raw probability columns ───────────────────────────────────────────────
     k  = pd.to_numeric(df.get('p_k',  0), errors='coerce').fillna(0)
     bb = pd.to_numeric(df.get('p_bb', 0), errors='coerce').fillna(0)
 
-    # ── Layer 2: K% and BB% ───────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 2 — K% and BB% bonuses
+    # ─────────────────────────────────────────────────────────────────────────
     k_bonus = ((k - cfg['league_k_avg']) * cfg['under_k_weight']).clip(lower=0)
 
     bb_xb   = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_xb']  ).clip(lower=0)
@@ -101,8 +113,9 @@ def compute_under_scores(df: pd.DataFrame,
     bb_tb05 = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_tb05']).clip(lower=0)
     bb_hit  = ((bb - cfg['league_bb_avg']) * cfg['under_bb_weight_hit'] ).clip(lower=0)
 
-    # ── Layer 3: Pitcher grade + recent form ──────────────────────────────────
-    # Grade bonus: static season-level quality
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYER 3 — Pitcher grade bonus
+    # ─────────────────────────────────────────────────────────────────────────
     def _pgbonus(grade):
         return (cfg['under_pitcher_bonus'] if grade == 'A+' else
                 cfg['under_pitcher_a']     if grade == 'A'  else 0.0)
@@ -110,48 +123,6 @@ def compute_under_scores(df: pd.DataFrame,
     p_bonus = df['pitch_grade'].apply(_pgbonus) \
               if 'pitch_grade' in df.columns \
               else pd.Series(0.0, index=df.index)
-
-    # Pitcher recent form bonus: low ERA/WHIP in last 7 days = extra suppression
-    # ERA league avg ~4.20 — below = dominant, above = hittable
-    # WHIP league avg ~1.30 — below = clean, above = hitters reaching base
-    ERA_LG  = 4.20
-    WHIP_LG = 1.30
-
-    def _pitcher_form_bonus(pitcher_name: str) -> float:
-        if not pitcher_name or not pitcher_form:
-            return 0.0
-        # Try full name then last name
-        pf = pitcher_form.get(pitcher_name)
-        if not pf:
-            last = pitcher_name.split()[-1]
-            pf   = pitcher_form.get(last)
-        if not pf or pf.get('games', 0) < 1:
-            return 0.0
-        era_bonus  = np.clip((ERA_LG  - pf['era'])  * 0.8, -3.0, 3.0)
-        whip_bonus = np.clip((WHIP_LG - pf['whip']) * 3.0, -2.0, 2.0)
-        return float(era_bonus + whip_bonus)
-
-    p_form_bonus = df['Pitcher'].apply(_pitcher_form_bonus) \
-                   if 'Pitcher' in df.columns \
-                   else pd.Series(0.0, index=df.index)
-
-    # Rest/workload signal — days since last start and IP from that outing
-    # Well-rested pitcher = sharper arm = better for unders
-    # Short rest / early exit last time = fatigue/uncertainty = worse for unders
-    def _rest_signal(pitcher_name: str) -> float:
-        if not pitcher_name or not rest_map:
-            return 0.0
-        info = rest_map.get(pitcher_name)
-        if not info:
-            last = pitcher_name.split()[-1]
-            info = rest_map.get(last)
-        if not info:
-            return 0.0
-        return float(info.get('rest_signal', 0.0))
-
-    p_rest_bonus = df['Pitcher'].apply(_rest_signal) \
-                   if 'Pitcher' in df.columns \
-                   else pd.Series(0.0, index=df.index)
 
     # ─────────────────────────────────────────────────────────────────────────
     # LAYER 4 — Historical matchup AVG/PA
@@ -272,13 +243,9 @@ def compute_under_scores(df: pd.DataFrame,
 
         gc_general    = (hits_sig + runs_sig + k_sig + qs_sig).clip(-gc_max, gc_max)
         gc_power_supp = (hits_sig + runs_sig + k_sig + qs_sig + hr_sig).clip(-gc_max, gc_max)
-        # HRR under: low-scoring environment = fewer run/RBI opportunities
-        # Invert runs_sig — below-median runs = good for HRR under = positive
-        gc_hrr_over   = (runs_sig * 1.5 + hits_sig * 0.5).clip(-gc_max, gc_max)
     else:
         gc_general    = pd.Series(0.0, index=df.index)
         gc_power_supp = pd.Series(0.0, index=df.index)
-        gc_hrr_over   = pd.Series(0.0, index=df.index)
 
     # ─────────────────────────────────────────────────────────────────────────
     # LAYER 10 — Batting order position
@@ -325,88 +292,73 @@ def compute_under_scores(df: pd.DataFrame,
 
     # ── XB Under ─────────────────────────────────────────────────────────────
     df['Under_XB_Score'] = (
-        (100 - xb)  * 0.42
-      + (100 - hr)  * 0.22
-      + (100 - hit) * 0.08
-      + k_bonus + bb_xb
-      + p_bonus + p_form_bonus + p_rest_bonus   # L3 — grade + form + rest
-      + hist_xb
-      + xb_rate_adj
-      + barrel_adj + hh_adj + avgev_adj + xslg_adj
-      + vsgrade_adj - parkxb_pen
-      + gc_power_supp
-      + order_adj + platoon_adj
+        (100 - xb)  * 0.42      # L1
+      + (100 - hr)  * 0.22      # L1
+      + (100 - hit) * 0.08      # L1
+      + k_bonus + bb_xb         # L2
+      + p_bonus                  # L3
+      + hist_xb                  # L4
+      + xb_rate_adj              # L5
+      + barrel_adj               # L7
+      + hh_adj                   # L7
+      + avgev_adj                # L7
+      + xslg_adj                 # L7
+      + vsgrade_adj              # L8
+      - parkxb_pen               # L8
+      + gc_power_supp            # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── TB Under 1.5 ─────────────────────────────────────────────────────────
     single_profile_bonus = ((single - xb) * 0.15).clip(lower=0, upper=5)
     df['Under_TB15_Score'] = (
-        (100 - xb)  * 0.45
-      + (100 - hr)  * 0.28
+        (100 - xb)  * 0.45      # L1
+      + (100 - hr)  * 0.28      # L1
       + single_profile_bonus
-      + k_bonus + bb_tb15
-      + p_bonus + p_form_bonus + p_rest_bonus   # L3
-      + hist_tb15
-      + xb_rate_adj * 0.7
-      + xslg_adj * 0.8 + barrel_adj * 0.5
-      + vsgrade_adj - parkxb_pen * 0.5
-      + gc_power_supp * 0.8
-      + order_adj + platoon_adj
+      + k_bonus + bb_tb15       # L2
+      + p_bonus                  # L3
+      + hist_tb15                # L4
+      + xb_rate_adj * 0.7       # L5
+      + xslg_adj * 0.8          # L7
+      + barrel_adj * 0.5        # L7
+      + vsgrade_adj              # L8
+      - parkxb_pen * 0.5        # L8
+      + gc_power_supp * 0.8     # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── TB Under 0.5 ─────────────────────────────────────────────────────────
     df['Under_TB05_Score'] = (
-        (100 - hit) * 0.40
-      + (100 - xb)  * 0.28
-      + (100 - hr)  * 0.22
-      + k_bonus * 1.2 + bb_tb05
-      + p_bonus + p_form_bonus + p_rest_bonus   # L3
-      + hist_tb05
-      + hit_rate_adj
-      + xba_adj * 0.7 + xwoba_adj * 0.5
-      + vsgrade_adj
-      + gc_general
-      + order_adj + platoon_adj
+        (100 - hit) * 0.40      # L1
+      + (100 - xb)  * 0.28      # L1
+      + (100 - hr)  * 0.22      # L1
+      + k_bonus * 1.2 + bb_tb05 # L2
+      + p_bonus                  # L3
+      + hist_tb05                # L4
+      + hit_rate_adj             # L6
+      + xba_adj   * 0.7         # L7
+      + xwoba_adj * 0.5         # L7
+      + vsgrade_adj              # L8
+      + gc_general               # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── Hit Under ─────────────────────────────────────────────────────────────
     df['Under_Hit_Score'] = (
-        (100 - hit) * 0.45
-      + k_bonus * 1.8 + bb_hit
-      + p_bonus + p_form_bonus + p_rest_bonus   # L3
-      + hist_hit
-      + hit_rate_adj * 1.2
-      + xba_adj + xwoba_adj * 0.7
-      + vsgrade_adj * 1.2
-      + gc_general * 1.1
-      + order_adj + platoon_adj
-    ).clip(0, 100).round(1)
-
-    # ── H+R+RBI Under ─────────────────────────────────────────────────────────
-    # Fading a player's composite H+R+RBI total.
-    # The prop cashes UNDER when the player accumulates fewer than 2 combined.
-    # Key: batting order is the dominant signal INVERTED — slots 7-9 are ideal
-    # (rarely score or drive in runs). Cleanup slots 3-5 are BAD for this under
-    # (most dangerous for accumulating H+R+RBI). Low-scoring game = good.
-    # Under_HRR_Score = inverted HRR_Score (in df if Stage 5 ran) + GC suppression.
-    hrr_base = pd.Series(50.0, index=df.index)
-    if 'HRR_Score' in df.columns:
-        hrr_base = pd.to_numeric(df['HRR_Score'], errors='coerce').fillna(50.0)
-
-    # Order signal is flipped: late-order = GOOD for HRR under
-    order_hrr_under = -order_adj   # invert: penalty where over gets bonus
-
-    df['Under_HRR_Score'] = (
-        (100 - hrr_base) * 0.55  # primary: invert the HRR over score
-      + k_bonus * 1.0             # K% still good (no H contribution)
-      + bb_hit                    # BB% good (walk = no RBI if bases empty)
-      + p_bonus                   # elite pitcher suppresses all
-      + hist_hit  * 0.8           # historical AVG (weak matchup = fewer H)
-      + hit_rate_adj              # cold hitter = fewer hits = fewer H+R+RBI
-      + xwoba_adj * 0.6           # low offensive quality
-      + vsgrade_adj               # poor matchup
-      - gc_hrr_over               # low-scoring game environment = good for under
-      + order_hrr_under           # late-order batters = fewer R/RBI opportunities
+        (100 - hit) * 0.45      # L1
+      + k_bonus * 1.8 + bb_hit  # L2
+      + p_bonus                  # L3
+      + hist_hit                 # L4
+      + hit_rate_adj * 1.2      # L6
+      + xba_adj                  # L7
+      + xwoba_adj * 0.7         # L7
+      + vsgrade_adj * 1.2       # L8
+      + gc_general * 1.1        # L9
+      + order_adj                # L10
+      + platoon_adj              # L11
     ).clip(0, 100).round(1)
 
     # ── Disqualification flags ─────────────────────────────────────────────────
@@ -418,12 +370,6 @@ def compute_under_scores(df: pd.DataFrame,
                        (xb  > cfg['under_tb_disq_any']) | \
                        (hr  > cfg['under_tb_disq_any'])
     df['_disq_hit']  = hit > cfg['under_hit_disq_hit']
-    # HRR Under: disqualify when batting order slots 1-5 AND high Hit_Score
-    # (cleanup hitters in good spots almost always accumulate H+R+RBI)
-    df['_disq_hrr']  = (hit > 65.0) & (
-        df.get('_order_pos', pd.Series(6, index=df.index))
-          .apply(lambda x: int(x) in [1,2,3,4,5] if pd.notna(x) else False)
-    )
 
     return df
 
@@ -471,13 +417,6 @@ def _disq_reason(row: pd.Series, target: str) -> str:
         hit = float(row.get('Hit_Score', 0) or 0)
         if hit > cfg['under_hit_disq_hit']:
             reasons.append(f"Hit={hit:.0f}")
-    elif target == 'hrr':
-        hit = float(row.get('Hit_Score', 0) or 0)
-        pos = row.get('_order_pos')
-        if hit > 65.0:
-            reasons.append(f"Hit={hit:.0f}")
-        if pd.notna(pos) and int(pos) in [1,2,3,4,5]:
-            reasons.append(f"Slot #{int(pos)} (high R/RBI opportunity)")
     return ", ".join(reasons)
 
 
@@ -502,7 +441,6 @@ def build_under_filters(df: pd.DataFrame) -> dict:
         "📊 TB Under 1.5 — Under 1.5 Total Bases":         "tb15",
         "📉 TB Under 0.5 — No Bases At All":               "tb05",
         "❌ Hit Under — No Hit (0.5 line)":                 "hit",
-        "🔴 H+R+RBI Under — Under 1.5 Hits+Runs+RBIs":    "hrr",
     }
     u_label            = st.sidebar.selectbox("Choose Under Target", list(under_map.keys()))
     filters['under']   = under_map[u_label]
@@ -513,14 +451,12 @@ def build_under_filters(df: pd.DataFrame) -> dict:
         'tb15': 'Under_TB15_Score',
         'tb05': 'Under_TB05_Score',
         'hit':  'Under_Hit_Score',
-        'hrr':  'Under_HRR_Score',
     }
     disq_col_map = {
         'xb':   '_disq_xb',
         'tb15': '_disq_tb15',
         'tb05': '_disq_tb05',
         'hit':  '_disq_hit',
-        'hrr':  '_disq_hrr',
     }
     filters['under_score_col'] = score_col_map[filters['under']]
     filters['under_disq_col']  = disq_col_map[filters['under']]
@@ -741,32 +677,9 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         'Under_TB15_Score': '📊 TB Under 1.5',
         'Under_TB05_Score': '📉 TB Under 0.5',
         'Under_Hit_Score':  '❌ Hit Under',
-        'Under_HRR_Score':  '🔴 H+R+RBI Under',
     }
 
-    # Derive display rest column from pitcher name + rest_map
-    # Done here (display layer) rather than in compute — keeps scoring clean
-    if 'Pitcher' in disp.columns:
-        try:
-            from mlb_api import get_pitcher_rest_map as _grm
-            _rm = _grm()
-            def _rest_label(pitcher: str) -> str:
-                if not pitcher or not _rm: return "—"
-                info = _rm.get(pitcher) or _rm.get(pitcher.split()[-1])
-                if not info: return "—"
-                d = info.get('days_rest', 0)
-                if d >= 5:   return f"✅ {d}d"
-                elif d == 4: return f"✅ {d}d"
-                elif d == 3: return f"⚠️ {d}d"
-                else:        return f"❌ {d}d"
-            disp['Rest'] = disp['Pitcher'].apply(_rest_label)
-            has_rest = disp['Rest'].ne("—").any()
-        except Exception:
-            has_rest = False
-    else:
-        has_rest = False
-
-    col_order = ['Batter','Team','Pitcher','pitch_grade','Rest','Disq',
+    col_order = ['Batter','Team','Pitcher','pitch_grade','Disq',
                  sc,
                  'prop_tb_line','prop_tb_under_odds','prop_tb_over_odds',
                  'prop_hr_odds',
@@ -779,7 +692,6 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
     rename   = {
         sc:            label_map.get(sc, 'Under Score'),
         'pitch_grade': 'P.Grd ↑',    # ↑ = higher grade = better for under
-        'Rest':        'Rest',
         'p_k':         'K%',
         'p_bb':        'BB%',
         'total_hit_prob':'Hit%',
@@ -844,7 +756,7 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         out_df    = out_df.copy()          # decouple from disp before insert
         out_df.insert(insert_at, 'Tier', tier_vals)
 
-    _text_cols = {'Tier', 'Status', 'Rest', 'Market Edge', 'TB Line', 'TB Under',
+    _text_cols = {'Tier', 'Status', 'Market Edge', 'TB Line', 'TB Under',
                   'TB Over', 'HR Odds', 'P.Grd', 'P.Grd ↑', 'Batter', 'Team', 'Pitcher'}
 
     fmt = {}
@@ -936,9 +848,6 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         col_cfg['Team']   = CC.TextColumn("Team",   width="small")
         col_cfg['Status'] = CC.TextColumn("Status", width="small",
                                           help="✅ = clean candidate · ⚠️ = disqualified (offsetting high score)")
-        col_cfg['Rest']   = CC.TextColumn("Rest", width="small",
-                                          help="Pitcher days rest since last start. "
-                                               "✅ 4-5+d = normal/well-rested. ⚠️ 3d = short rest. ❌ ≤2d = very short.")
         col_cfg['Tier']   = CC.TextColumn("Tier", width="small",
                                           help="Under Score tier: ELITE ≥75 · STRONG ≥60 · GOOD ≥45")
         if 'P.Grd ↑' in out_df.columns or 'P.Grd' in out_df.columns:
@@ -993,7 +902,6 @@ def _render_under_table(filtered_df: pd.DataFrame, filters: dict):
         'tb15': f"Disqualified if XB_Score>{cfg['under_xb_disq_hr']:.0f} or HR_Score>{cfg['under_xb_disq_hr']:.0f} — singles are FINE for this line",
         'tb05': f"Disqualified if ANY of Hit/XB/HR_Score>{cfg['under_tb_disq_any']:.0f}",
         'hit':  f"Disqualified if Hit_Score>{cfg['under_hit_disq_hit']:.0f}",
-        'hrr':  "Disqualified if Hit_Score>65 AND batting order slot 1-5 (cleanup hitters almost always accumulate H+R+RBI)",
     }.get(target, "")
 
     st.markdown(
@@ -1041,22 +949,14 @@ def under_page(df: pd.DataFrame, filters_base: dict):
     # Build sidebar filters FIRST — use_gc must be known before scoring
     filters = build_under_filters(df)
 
-    # Compute under scores with form maps and GC from filters
+    # Now compute under scores with the correct use_gc from filters
     try:
-        from mlb_api import get_recent_batting_form as _get_form, \
-                            get_recent_pitcher_form as _get_pitcher_form, \
-                            get_pitcher_rest_map    as _get_rest_map
-        _form         = _get_form(days=7)
-        _pitcher_form = _get_pitcher_form(days=7)
-        _rest_map     = _get_rest_map()
+        from mlb_api import get_recent_batting_form as _get_form
+        _form = _get_form(days=7)
     except Exception:
-        _form         = {}
-        _pitcher_form = {}
-        _rest_map     = {}
+        _form = {}
     df = compute_under_scores(df, form_map=_form,
-                              use_gc=filters.get('use_gc', True),
-                              pitcher_form=_pitcher_form,
-                              rest_map=_rest_map)
+                              use_gc=filters.get('use_gc', True))
 
     # Apply confirmed lineup filter (same logic as main page)
     if filters.get('confirmed_only'):
@@ -1209,122 +1109,15 @@ def under_page(df: pd.DataFrame, filters_base: dict):
     with c2:
         if not filtered_df.empty:
             from datetime import datetime
-            import io, openpyxl
-            from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-            from openpyxl.utils import get_column_letter
-
-            # Build clean under export df
-            _drop = ['pitch_hit_mult','pitch_hr_mult','pitch_walk_pen',
-                     'rc_norm','rc_contrib','vs_mod','vs_contrib',
-                     'xb_boost','hist_bonus','Starter',
-                     'p_1b_base','p_xb_base','p_hr_base','p_k_base','p_bb_base',
-                     'Hit_Score_base','Single_Score_base','XB_Score_base','HR_Score_base']
-            _int_cols = [c for c in filtered_df.columns if c.startswith('_')
-                         or (c.startswith('Under_') and c != filters['under_score_col'])
-                         or c.startswith('disq')]
             export_cols = [c for c in filtered_df.columns
-                           if c not in _drop and c not in _int_cols]
-            export_df = filtered_df[export_cols].copy()
-            score_col = filters['under_score_col']
-            lmap = {
-                'Under_XB_Score':'XB Under Score','Under_TB15_Score':'TB 1.5 Under Score',
-                'Under_TB05_Score':'TB 0.5 Under Score','Under_Hit_Score':'Hit Under Score',
-                'Under_HRR_Score':'H+R+RBI Under Score',
-            }
-            export_df = export_df.rename(columns={
-                score_col: lmap.get(score_col,'Under Score'),
-                'pitch_grade':'Pitcher Grade','p_k':'K%','p_bb':'BB%',
-                'total_hit_prob':'Hit%','p_1b':'1B%','p_xb':'XB%','p_hr':'HR%',
-                'vs Grade':'vs Pitcher Grade','Hit_Score':'Hit Score',
-                'XB_Score':'XB Score','HR_Score':'HR Score','PA':'Hist PA',
-                'H':'Hist H','AVG':'Hist AVG','bvp_avg':'BvP AVG',
-                'bvp_ops':'BvP OPS','bvp_ab':'BvP AB',
-                'prop_tb_line':'TB Line','prop_tb_under_odds':'TB Under Odds',
-                'split_avg':'Split AVG',
-            })
-            ul = lmap.get(score_col, 'Under Score')
-
-            # Round numerics
-            for col in export_df.columns:
-                try:
-                    s = pd.to_numeric(export_df[col], errors='coerce')
-                    if s.notna().any():
-                        export_df[col] = s.round(3 if 'AVG' in col or 'OPS' in col else 1)
-                except Exception:
-                    pass
-
-            try:
-                # Build xlsx
-                wb = openpyxl.Workbook()
-                ws = wb.active
-                ws.title = "Under Targets"
-                ws.sheet_properties.tabColor = "F87171"
-
-                HDR_BG = "0D1321"; HDR_FG = "E8EEF7"
-                ALT    = "0F1923"
-                TIER = {"ELITE":("052E16","4ADE80"),"STRONG":("1C2A00","A3E635"),
-                        "GOOD":("1C1500","FBBF24"),"MODERATE":("1C0800","FB923C"),
-                        "WEAK":("1C0000","F87171")}
-
-                hfill = PatternFill("solid", fgColor=HDR_BG)
-                hfont = Font(bold=True, color=HDR_FG, name="Calibri", size=9)
-                halign= Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-                for ci, cn in enumerate(export_df.columns, 1):
-                    c = ws.cell(1, ci, cn)
-                    c.fill=hfill; c.font=hfont; c.alignment=halign
-                ws.row_dimensions[1].height = 28
-                ws.freeze_panes = "A2"
-
-                # Insert Tier column after under score
-                tier_col_idx = None
-                if ul in export_df.columns:
-                    tier_col_idx = list(export_df.columns).index(ul) + 2  # 1-based after score
-
-                bfont = Font(name="Calibri", size=9, color=HDR_FG)
-                afill = PatternFill("solid", fgColor=ALT)
-
-                for ri, (_, row) in enumerate(export_df.iterrows(), 2):
-                    for ci, (cn, val) in enumerate(row.items(), 1):
-                        cell = ws.cell(ri, ci, val)
-                        cell.font = bfont
-                        cell.alignment = Alignment(horizontal="center", vertical="center")
-                        if ri % 2 == 0:
-                            cell.fill = afill
-                        if cn == "Tier" and val in TIER:
-                            bg, fg = TIER[val]
-                            cell.fill = PatternFill("solid", fgColor=bg)
-                            cell.font = Font(name="Calibri", size=9, color=fg, bold=True)
-                        elif "AVG" in cn or "OPS" in cn:
-                            cell.number_format = "0.000"
-                        elif "Score" in cn or "%" in cn:
-                            cell.number_format = "0.0"
-
-                ws.auto_filter.ref = f"A1:{get_column_letter(len(export_df.columns))}1"
-
-                # Col widths
-                for ci, cn in enumerate(export_df.columns, 1):
-                    l = get_column_letter(ci)
-                    ws.column_dimensions[l].width = (
-                        16 if cn in ("Batter","Pitcher") else
-                        13 if "Score" in cn else
-                        10 if "AVG" in cn or "OPS" in cn or "BvP" in cn else
-                        8  if "%" in cn else 9
-                    )
-
-                buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-                st.download_button(
-                    "📊 Export Excel",
-                    buf.read(),
-                    f"a1picks_unders_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="under_export",
-                    help="Color-coded Excel with tier highlights and BvP formatting",
-                )
-            except Exception:
-                st.download_button(
-                    "💾 Export CSV (fallback)",
-                    export_df.to_csv(index=False),
-                    f"a1picks_unders_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv", key="under_export_csv",
-                )
+                           if not c.startswith('_') and c not in
+                           ['pitch_hit_mult','pitch_hr_mult','pitch_walk_pen',
+                            'rc_norm','rc_contrib','vs_mod','vs_contrib',
+                            'xb_boost','hist_bonus']]
+            st.download_button(
+                "💾 Export CSV",
+                filtered_df[export_cols].to_csv(index=False),
+                f"a1picks_unders_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                key="under_export"
+            )

@@ -293,52 +293,7 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
             note = ""
         st.markdown(_card("Platoon Analysis", plat_body + note, "🤜"), unsafe_allow_html=True)
 
-        # 3. Pitcher Rest & Workload
-        rest_info = None
-        if pitcher and pitcher != '—':
-            try:
-                from mlb_api import get_pitcher_rest_map as _grm
-                _rm = _grm()
-                rest_info = _rm.get(pitcher) or _rm.get(pitcher.split()[-1])
-            except Exception:
-                pass
-
-        if rest_info:
-            days  = rest_info.get('days_rest', 0)
-            lip   = rest_info.get('last_ip',   0.0)
-            rsig  = rest_info.get('rest_signal', 0.0)
-            ldate = rest_info.get('last_date', '—')
-
-            if days >= 5:
-                rest_lbl, rest_col = "Well rested ✅", "#4ade80"
-            elif days == 4:
-                rest_lbl, rest_col = "Normal rest ✅", "#94a3b8"
-            elif days == 3:
-                rest_lbl, rest_col = "Short rest ⚠️", "#fbbf24"
-            else:
-                rest_lbl, rest_col = "Very short rest ❌", "#f87171"
-
-            workload_note = (
-                "Deep outing — arm well-conditioned" if lip >= 7.0 else
-                "Short outing — arm state uncertain" if 0 < lip <= 3.0 else
-                "Standard workload"
-            )
-            rest_body = (
-                _row("Days Rest",      str(days),       rest_lbl, days >= 4, vcol=rest_col)
-              + _row("Last Start",     ldate,            "",   None)
-              + _row("Last Start IP",  f"{lip:.1f}",    workload_note, lip >= 5.0)
-              + _row("Under Adj",      f"{rsig:+.1f} pts",
-                     "added to all under scores", rsig >= 0)
-            )
-        else:
-            rest_body = (
-                _row("Rest Data", "Unavailable", "", None)
-              + _row("Reason",    "Pitcher not confirmed or API unavailable", "", None)
-            )
-        st.markdown(_card("Pitcher Rest & Workload", rest_body, "💤"),
-                    unsafe_allow_html=True)
-
-        # 4. xBA Luck Signal
+        # 3. xBA Luck Signal
         xba_val = row.get('xBA')
         # FIX: fall back to BallPark Pal AVG when FanGraphs fg_AVG is missing
         fg_avg  = row.get('fg_AVG')

@@ -278,11 +278,10 @@ def render_score_summary_cards(slate_df: pd.DataFrame, filters: dict):
                 unsafe_allow_html=True)
 
     defs = [
-        ('Hit_Score',    'scard-hit',    '🎯', 'HIT',      'Any Base Hit'),
-        ('Single_Score', 'scard-single', '1️⃣', 'SINGLE',  'Single Specifically'),
-        ('XB_Score',     'scard-xb',     '🔥', 'XB',       'Double / Triple'),
-        ('HR_Score',     'scard-hr',     '💣', 'HR',        'Home Run'),
-        ('HRR_Score',    'scard-hit',    '🔴', 'H+R+RBI',  'Hits+Runs+RBIs'),
+        ('Hit_Score',    'scard-hit',    '🎯', 'HIT',    'Any Base Hit'),
+        ('Single_Score', 'scard-single', '1️⃣', 'SINGLE', 'Single Specifically'),
+        ('XB_Score',     'scard-xb',     '🔥', 'XB',     'Double / Triple'),
+        ('HR_Score',     'scard-hr',     '💣', 'HR',     'Home Run'),
     ]
 
     use_gc     = filters.get('use_gc', False)
@@ -460,8 +459,7 @@ def render_game_conditions_panel(slate_df: pd.DataFrame, filters: dict,
         return
 
     sc_lbl = {'Hit_Score':'Hit','Single_Score':'Single',
-               'XB_Score':'XB','HR_Score':'HR',
-               'HRR_Score':'H+R+RBI'}.get(sc, 'Score')
+               'XB_Score':'XB','HR_Score':'HR'}.get(sc, 'Score')
 
     with st.expander(f"🌦️ Game Conditions — {sc_lbl} Score Impact", expanded=True):
         gdf_disp = pd.DataFrame(game_rows)
@@ -474,296 +472,6 @@ def render_game_conditions_panel(slate_df: pd.DataFrame, filters: dict,
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULTS TABLE
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _build_export_df(filtered_df: pd.DataFrame, filters: dict) -> pd.DataFrame:
-    """
-    Build a clean, human-readable DataFrame for CSV export.
-    Uses the same column selection and renaming logic as render_results_table
-    but returns a formatted df instead of a styled one.
-
-    - Internal columns (_*) excluded
-    - Raw multiplier columns excluded
-    - Numeric columns rounded to appropriate precision
-    - Column names match what users see in the table
-    - Tier column included for offline reference
-    """
-    if filtered_df.empty:
-        return pd.DataFrame()
-
-    use_gc   = filters.get('use_gc', False)
-    use_park = filters.get('use_park', True)
-    sc_base  = filters.get('score_col_base', filters['score_col'].replace('_gc', ''))
-    sc_gc    = sc_base + '_gc'
-    base_sc  = sc_base + '_base'
-    sc       = sc_gc if (use_gc and sc_gc in filtered_df.columns) else sc_base
-
-    df = filtered_df.copy()
-
-    # Remove internal/raw columns
-    drop_pats = ['_order_pos','_form_rate','_form_label','_pitcher_hand',
-                 'pitch_hit_mult','pitch_hr_mult','pitch_walk_pen',
-                 'rc_norm','rc_contrib','vs_mod','vs_contrib',
-                 'xb_boost','hist_bonus','p_1b_base','p_xb_base',
-                 'p_hr_base','p_k_base','p_bb_base']
-    df = df.drop(columns=[c for c in drop_pats if c in df.columns], errors='ignore')
-    df = df[[c for c in df.columns if not c.startswith('_') and
-             not c.startswith('disq') and c not in
-             ('Starter','p_1b_park','p_xb_park','p_hr_park')]]
-
-    # Compute display columns
-    if 'p_k' in df.columns:
-        df['K% ↓Lg']  = (CONFIG['league_k_avg']  - df['p_k']).round(1)
-    if 'p_bb' in df.columns:
-        df['BB% ↓Lg'] = (CONFIG['league_bb_avg'] - df['p_bb']).round(1)
-    if 'p_hr' in df.columns:
-        df['HR% ↑Lg'] = (df['p_hr'] - CONFIG['league_hr_avg']).round(2)
-    if 'total_hit_prob' in df.columns:
-        df['Hit%']    = df['total_hit_prob'].round(1)
-    if 'PA' in df.columns:
-        df['PA'] = pd.to_numeric(df['PA'], errors='coerce').fillna(0).astype(int)
-    if 'AVG' in df.columns:
-        df['AVG'] = pd.to_numeric(df['AVG'], errors='coerce').round(3)
-
-    # Score tier
-    lbl = {'Hit_Score':'Hit Score','Single_Score':'Single Score',
-           'XB_Score':'XB Score','HR_Score':'HR Score','HRR_Score':'H+R+RBI Score'}
-    active_label = lbl.get(sc_base, 'Score')
-    if sc in df.columns:
-        tier_map = lambda s: (
-            "ELITE"    if s >= 75 else "STRONG" if s >= 60 else
-            "GOOD"     if s >= 45 else "MODERATE" if s >= 30 else "WEAK"
-        )
-        tier_vals = df[sc].apply(lambda x: tier_map(float(x)) if pd.notna(x) else "")
-
-    # Column rename map — mirrors render_results_table naming
-    rename = {
-        sc:            active_label,
-        sc_base:       f"{active_label} (Base)",
-        sc_gc:         f"{active_label} (GC)",
-        'pitch_grade': 'Pitcher Grade',
-        'p_k':         'K%', 'p_bb':'BB%',
-        'p_1b':        '1B%','p_xb':'XB%','p_hr':'HR%',
-        'total_hit_prob':'Hit%',
-        'vs Grade':    'vs Pitcher Grade',
-        'Hit_Score':   'Hit Score', 'Single_Score':'Single Score',
-        'XB_Score':    'XB Score',  'HR_Score':'HR Score',
-        'HRR_Score':   'H+R+RBI Score',
-        'Hit_Score_gc':'Hit Score (GC)', 'XB_Score_gc':'XB Score (GC)',
-        'HR_Score_gc': 'HR Score (GC)',  'HRR_Score_gc':'H+R+RBI Score (GC)',
-        'Hit_Score_base':'Hit Score (Base)', 'XB_Score_base':'XB Score (Base)',
-        'bvp_avg':     'BvP Career AVG',  'bvp_ops':'BvP Career OPS',
-        'bvp_ab':      'BvP Career AB',   'bvp_hr':'BvP Career HR',
-        'bvp_rbi':     'BvP Career RBI',  'bvp_k':'BvP Career K',
-        'split_avg':   'Split AVG (vs hand)', 'split_ops':'Split OPS (vs hand)',
-        'prop_tb_line':'TB Line', 'prop_tb_under_odds':'TB Under Odds',
-        'prop_tb_over_odds':'TB Over Odds', 'prop_hr_odds':'HR Odds',
-    }
-    df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
-
-    # Insert Tier column right after active score column
-    if active_label in df.columns and tier_vals is not None:
-        insert_at = df.columns.get_loc(active_label) + 1
-        df = df.copy()
-        df.insert(insert_at, 'Tier', tier_vals)
-
-    # Round all remaining float columns to sensible precision
-    for col in df.columns:
-        if col in ('Tier','Pitcher Grade','Batter','Team','Pitcher',
-                   'TB Line','TB Under Odds','TB Over Odds','HR Odds'):
-            continue
-        try:
-            series = pd.to_numeric(df[col], errors='coerce')
-            if series.notna().any():
-                if 'AVG' in col or 'OPS' in col or col in ('BvP Career AVG','Split AVG (vs hand)'):
-                    df[col] = series.round(3)
-                elif col.endswith('%') or 'Score' in col or col in ('Tier',):
-                    df[col] = series.round(1)
-                else:
-                    df[col] = series.round(2)
-        except Exception:
-            pass
-
-    return df
-
-
-def _build_export_xlsx(filtered_df: pd.DataFrame, filters: dict) -> bytes:
-    """
-    Build a formatted Excel (.xlsx) workbook from the current results.
-
-    Formatting applied:
-    - Frozen header row, auto-filter on all columns
-    - Bold, dark-background header row with white text
-    - Tier column color-coded (ELITE=green, STRONG=yellow, GOOD=orange, etc.)
-    - Score columns with conditional color scale (white→green gradient)
-    - BvP AVG/OPS columns color-coded (green=dominant, red=struggles)
-    - Alternating row shading for readability
-    - Auto-fitted column widths
-    - Separate 'Under Scores' sheet when under score columns present
-    """
-    import io
-    import openpyxl
-    from openpyxl.styles import (PatternFill, Font, Alignment, Border, Side,
-                                  GradientFill)
-    from openpyxl.utils import get_column_letter
-    from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
-    from openpyxl.styles.numbers import FORMAT_PERCENTAGE_00
-
-    # Build clean df first
-    export_df = _build_export_df(filtered_df, filters)
-    if export_df.empty:
-        return b""
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "A1PICKS Results"
-
-    # ── Color palette ─────────────────────────────────────────────────────────
-    C_HEADER_BG  = "0D1321"   # dark navy header
-    C_HEADER_FG  = "E8EEF7"   # light text
-    C_ALT_ROW    = "0F1923"   # slightly lighter than header
-    C_ELITE      = "052E16"   # dark green bg
-    C_ELITE_FG   = "4ADE80"
-    C_STRONG     = "1C2A00"
-    C_STRONG_FG  = "A3E635"
-    C_GOOD       = "1C1500"
-    C_GOOD_FG    = "FBBF24"
-    C_MOD        = "1C0800"
-    C_MOD_FG     = "FB923C"
-    C_WEAK       = "1C0000"
-    C_WEAK_FG    = "F87171"
-    C_BVP_HIGH   = "052E16"   # strong BvP history = green
-    C_BVP_HIGH_FG= "4ADE80"
-    C_BVP_LOW    = "1C0000"
-    C_BVP_LOW_FG = "F87171"
-
-    # ── Write header row ──────────────────────────────────────────────────────
-    header_fill = PatternFill("solid", fgColor=C_HEADER_BG)
-    header_font = Font(bold=True, color=C_HEADER_FG, name="Calibri", size=9)
-    header_align= Alignment(horizontal="center", vertical="center", wrap_text=True)
-    thin_border = Border(
-        bottom=Side(style="thin", color="1E2D3D"),
-        right=Side(style="thin", color="1E2D3D"),
-    )
-
-    for col_idx, col_name in enumerate(export_df.columns, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=col_name)
-        cell.fill  = header_fill
-        cell.font  = header_font
-        cell.alignment = header_align
-        cell.border = thin_border
-
-    ws.row_dimensions[1].height = 28
-    ws.freeze_panes = "A2"
-
-    # ── Write data rows ───────────────────────────────────────────────────────
-    alt_fill = PatternFill("solid", fgColor=C_ALT_ROW)
-    base_font = Font(name="Calibri", size=9, color=C_HEADER_FG)
-
-    for row_idx, (_, row) in enumerate(export_df.iterrows(), start=2):
-        row_fill = alt_fill if row_idx % 2 == 0 else None
-        for col_idx, (col_name, value) in enumerate(row.items(), start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            cell.font = base_font
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = Border(
-                right=Side(style="thin", color="1A2540"),
-                bottom=Side(style="thin", color="1A2540"),
-            )
-            if row_fill:
-                cell.fill = row_fill
-
-            # Tier column — color-coded by value
-            if col_name == "Tier" and isinstance(value, str):
-                tier_map = {
-                    "ELITE":    (C_ELITE,  C_ELITE_FG),
-                    "STRONG":   (C_STRONG, C_STRONG_FG),
-                    "GOOD":     (C_GOOD,   C_GOOD_FG),
-                    "MODERATE": (C_MOD,    C_MOD_FG),
-                    "WEAK":     (C_WEAK,   C_WEAK_FG),
-                }
-                if value in tier_map:
-                    bg, fg = tier_map[value]
-                    cell.fill = PatternFill("solid", fgColor=bg)
-                    cell.font = Font(name="Calibri", size=9, color=fg, bold=True)
-                    cell.alignment = Alignment(horizontal="center")
-
-            # Score columns — number format
-            elif ("Score" in col_name or "%" in col_name) and isinstance(value, (int, float)):
-                cell.number_format = "0.0"
-
-            # BvP columns — color high (>.300) green, low (<.200) red
-            elif "BvP" in col_name and "AVG" in col_name and isinstance(value, (int, float)):
-                cell.number_format = "0.000"
-                if value >= 0.300:
-                    cell.fill = PatternFill("solid", fgColor=C_BVP_HIGH)
-                    cell.font = Font(name="Calibri", size=9, color=C_BVP_HIGH_FG)
-                elif value > 0 and value < 0.200:
-                    cell.fill = PatternFill("solid", fgColor=C_BVP_LOW)
-                    cell.font = Font(name="Calibri", size=9, color=C_BVP_LOW_FG)
-
-            elif "AVG" in col_name and isinstance(value, (int, float)):
-                cell.number_format = "0.000"
-
-            elif "OPS" in col_name and isinstance(value, (int, float)):
-                cell.number_format = "0.000"
-
-    # ── Auto-filter on header row ─────────────────────────────────────────────
-    ws.auto_filter.ref = (
-        f"A1:{get_column_letter(len(export_df.columns))}1"
-    )
-
-    # ── Conditional color scale on main Score column ──────────────────────────
-    score_col_name = None
-    for col_name in export_df.columns:
-        if "Score" in col_name and "BvP" not in col_name and "Base" not in col_name:
-            score_col_name = col_name
-            break
-
-    if score_col_name and score_col_name in export_df.columns:
-        col_letter = get_column_letter(
-            list(export_df.columns).index(score_col_name) + 1)
-        last_row   = len(export_df) + 1
-        score_range = f"{col_letter}2:{col_letter}{last_row}"
-        ws.conditional_formatting.add(
-            score_range,
-            ColorScaleRule(
-                start_type="num",  start_value=0,  start_color="1C0000",
-                mid_type="num",    mid_value=50,   mid_color="1C1500",
-                end_type="num",    end_value=100,  end_color="052E16",
-            )
-        )
-
-    # ── Column widths ─────────────────────────────────────────────────────────
-    width_map = {
-        "Batter": 16, "Team": 7, "Pitcher": 16, "Pitcher Grade": 10,
-        "Tier": 9, "Profile": 12, "Pos": 5, "Form": 8,
-    }
-    for col_idx, col_name in enumerate(export_df.columns, start=1):
-        letter = get_column_letter(col_idx)
-        if col_name in width_map:
-            ws.column_dimensions[letter].width = width_map[col_name]
-        elif "Score" in col_name:
-            ws.column_dimensions[letter].width = 13
-        elif "%" in col_name or "Δ" in col_name:
-            ws.column_dimensions[letter].width = 8
-        elif "AVG" in col_name or "OPS" in col_name:
-            ws.column_dimensions[letter].width = 11
-        elif "BvP" in col_name:
-            ws.column_dimensions[letter].width = 10
-        elif "Odds" in col_name or "Line" in col_name:
-            ws.column_dimensions[letter].width = 10
-        else:
-            ws.column_dimensions[letter].width = 9
-
-    # ── Tab styling ───────────────────────────────────────────────────────────
-    ws.sheet_properties.tabColor = "10B981"   # green accent
-
-    # ── Save to bytes ─────────────────────────────────────────────────────────
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
-
 
 def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     if filtered_df.empty:
@@ -953,8 +661,7 @@ def render_results_table(filtered_df: pd.DataFrame, filters: dict):
     styled = out_df.style.format(fmt, na_rep="—")
 
     for sn, cm in {'🎯 Hit':'Greens','1️⃣ Single':'GnBu',
-                   '🔥 XB':'YlOrBr','💣 HR':'YlOrRd',
-                   '🔴 H+R+RBI':'RdPu'}.items():
+                   '🔥 XB':'YlOrBr','💣 HR':'YlOrRd'}.items():
         tc = sn + ' ⛅' if (sn + ' ⛅') in out_df.columns else sn
         if tc in out_df.columns:
             try:
@@ -1187,11 +894,10 @@ def render_best_per_target(slate_df: pd.DataFrame, filters: dict):
         )
 
         defs = [
-            ('Hit_Score',    'pcard-hit',    '🎯', 'HIT',      'Any Base Hit'),
-            ('Single_Score', 'pcard-single', '1️⃣', 'SINGLE',  'Single'),
-            ('XB_Score',     'pcard-xb',     '🔥', 'XB',       'Double / Triple'),
-            ('HR_Score',     'pcard-hr',     '💣', 'HR',        'Home Run'),
-            ('HRR_Score',    'pcard-hit',    '🔴', 'H+R+RBI',  'Hits+Runs+RBIs'),
+            ('Hit_Score',    'pcard-hit',    '🎯', 'HIT',    'Any Base Hit'),
+            ('Single_Score', 'pcard-single', '1️⃣', 'SINGLE', 'Single'),
+            ('XB_Score',     'pcard-xb',     '🔥', 'XB',     'Double / Triple'),
+            ('HR_Score',     'pcard-hr',     '💣', 'HR',     'Home Run'),
         ]
 
         use_gc     = filters.get('use_gc', False)

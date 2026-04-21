@@ -378,23 +378,12 @@ def compute_scores(df: pd.DataFrame,
             df[col] = (df[col] + platoon_adj).clip(0,100).round(1)
 
     # ── Stage 4: Cross-score profile correction ───────────────────────────────
-    # Penalise Single_Score when XB or HR significantly exceeds it.
-    # Tightened from original so profile-mismatched players (like Garcia)
-    # consistently rank BELOW true singles hitters (like Jungle Lee).
-    #
-    # Garcia example (XB=82, Hit=84, Single=70):
-    #   Old: gap=12 → excess=4 → penalty=1.6 pts  (too weak)
-    #   New: gap=12 → excess=7 → penalty=4.2 pts  (Lee at 75 now clearly wins)
-    #
-    # Thresholds deliberately kept at a floor so incidental score differences
-    # (1-3 pts) don't trigger a penalty — only meaningful profile mismatches do.
-
-    XB_GAP_THRESHOLD = 5.0    # was 8 — catch gaps earlier
-    XB_RATE          = 0.60   # was 0.40 — stronger penalty per gap point
-    XB_MAX           = 12.0   # was 8 — allow larger total penalty for large gaps
-    HR_GAP_THRESHOLD = 10.0   # was 12 — catch power profiles earlier
-    HR_RATE          = 0.40   # was 0.25 — slightly stronger
-    HR_MAX           = 7.0    # was 5
+    XB_GAP_THRESHOLD = 5.0
+    XB_RATE          = 0.60
+    XB_MAX           = 12.0
+    HR_GAP_THRESHOLD = 10.0
+    HR_RATE          = 0.40
+    HR_MAX           = 7.0
 
     if 'XB_Score' in df.columns and 'Single_Score' in df.columns:
         xb_gap  = (df['XB_Score'] - df['Single_Score'] - XB_GAP_THRESHOLD).clip(lower=0)
@@ -408,6 +397,132 @@ def compute_scores(df: pd.DataFrame,
         df['Single_Score']      = (df['Single_Score']      - hr_pen).clip(0, 100).round(1)
         df['Single_Score_base'] = (df['Single_Score_base'] - hr_pen).clip(0, 100).round(1)
 
+    # ── Stage 5: HRR Score (Hits + Runs + RBIs composite) ────────────────────
+    cfg = CONFIG
+
+    # BvP AVG overlay on Hit_Score FIRST — so HRR uses the corrected score
+    if 'bvp_avg' in df.columns and 'bvp_conf' in df.columns:
+        bvp_avg  = pd.to_numeric(df['bvp_avg'],  errors='coerce').fillna(cfg['league_avg'])
+        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
+        bvp_avg_adj = ((bvp_avg - cfg['league_avg']) * cfg['bvp_avg_weight']
+                       ).clip(-cfg['bvp_avg_max'], cfg['bvp_avg_max']) * bvp_conf
+        df['Hit_Score']      = (df['Hit_Score']      + bvp_avg_adj).clip(0, 100).round(1)
+        df['Hit_Score_base'] = (df['Hit_Score_base'] + bvp_avg_adj).clip(0, 100).round(1)
+
+    # BvP HR bonus on HR_Score FIRST — so HRR uses the corrected score
+    if 'bvp_hr' in df.columns and 'bvp_conf' in df.columns:
+        bvp_hr   = pd.to_numeric(df['bvp_hr'],   errors='coerce').fillna(0)
+        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
+        bvp_hr_adj = (bvp_hr * cfg['bvp_hr_bonus']
+                      ).clip(0, cfg['bvp_hr_bonus_max']) * bvp_conf
+        df['HR_Score']      = (df['HR_Score']      + bvp_hr_adj).clip(0, 100).round(1)
+        df['HR_Score_base'] = (df['HR_Score_base'] + bvp_hr_adj).clip(0, 100).round(1)
+
+    # NOW capture score series — includes BvP adjustments above
+    hit_s = df['Hit_Score'].clip(0, 100)
+    hr_s  = df['HR_Score'].clip(0, 100)
+
+    # Batting order bonus/penalty for run-production context
+    order_hrr = pd.Series(0.0, index=df.index)
+    if '_order_pos' in df.columns:
+        pos = pd.to_numeric(df['_order_pos'], errors='coerce')
+        order_hrr = order_hrr.where(~pos.isin([1, 2, 3, 4, 5]),
+                                     order_hrr + cfg['hrr_order_bonus'])
+        order_hrr = order_hrr.where(~pos.isin([7, 8, 9]),
+                                     order_hrr - cfg['hrr_order_penalty'])
+
+    # GC run environment bonus
+    gc_hrr = pd.Series(0.0, index=df.index)
+    if 'gc_runs10' in df.columns:
+        gc_runs = pd.to_numeric(df['gc_runs10'], errors='coerce').fillna(
+            cfg['gc_runs10_anchor'])
+        gc_hrr = ((gc_runs - cfg['gc_runs10_anchor']) * cfg['hrr_gc_weight']
+                  ).clip(-cfg['hrr_gc_max'], cfg['hrr_gc_max'])
+
+    # BvP OPS signal — confidence-weighted
+    bvp_hrr = pd.Series(0.0, index=df.index)
+    if 'bvp_ops' in df.columns and 'bvp_conf' in df.columns:
+        bvp_ops  = pd.to_numeric(df['bvp_ops'],  errors='coerce').fillna(cfg['hrr_bvp_ops_lg'])
+        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
+        bvp_raw  = ((bvp_ops - cfg['hrr_bvp_ops_lg']) * cfg['hrr_bvp_weight']
+                    ).clip(-cfg['hrr_bvp_max'], cfg['hrr_bvp_max'])
+        bvp_hrr  = bvp_raw * bvp_conf
+
+    # BvP H+RBI rate — direct prop proxy: (career H + RBI) / AB vs this pitcher
+    # More specific than OPS for this exact prop. Complements the OPS signal.
+    # League reference: ~0.40 combined H+RBI per AB (AVG .245 + RBI/PA ~.12 + overlap)
+    bvp_hrr_rate = pd.Series(0.0, index=df.index)
+    if all(c in df.columns for c in ['bvp_h','bvp_rbi','bvp_ab','bvp_conf']):
+        bvp_h    = pd.to_numeric(df['bvp_h'],    errors='coerce').fillna(0)
+        bvp_rbi  = pd.to_numeric(df['bvp_rbi'],  errors='coerce').fillna(0)
+        bvp_ab   = pd.to_numeric(df['bvp_ab'],   errors='coerce').fillna(0)
+        bvp_conf = pd.to_numeric(df['bvp_conf'], errors='coerce').fillna(0.0)
+        # Only compute when AB > 0
+        hrr_rate = (bvp_h + bvp_rbi).where(bvp_ab > 0, 0) / bvp_ab.where(bvp_ab > 0, 1)
+        HRR_RATE_LG = cfg.get('hrr_bvp_rate_lg', 0.40)
+        hrr_rate_adj = ((hrr_rate - HRR_RATE_LG) * cfg.get('hrr_bvp_rate_weight', 8.0)
+                        ).clip(-cfg.get('hrr_bvp_rate_max', 4.0),
+                                cfg.get('hrr_bvp_rate_max', 4.0)) * bvp_conf
+        bvp_hrr_rate = hrr_rate_adj.where(bvp_ab >= cfg.get('bvp_min_ab', 5), 0.0)
+
+    # Predecessor OBP signal — lineup protection
+    # A cleanup hitter needs someone ahead to get on base before they can get an RBI.
+    # For each batter, compute the average hit probability of the 1-2 batters
+    # immediately ahead in the same team's batting order.
+    # Only fires when _order_pos is confirmed (post-lineup confirmation).
+    # Cap ±3 pts — context signal, not primary.
+    pred_obp = pd.Series(0.0, index=df.index)
+    if '_order_pos' in df.columns and 'total_hit_prob' in df.columns:
+        # Build a lookup: (Team, order_pos) → total_hit_prob
+        slot_hitprob: dict[tuple, float] = {}
+        for _, r in df.iterrows():
+            pos = r.get('_order_pos')
+            team = r.get('Team', '')
+            hp   = r.get('total_hit_prob', 0.0)
+            if pd.notna(pos) and team:
+                slot_hitprob[(team, int(pos))] = float(hp or 0.0)
+
+        # League average hit prob for reference
+        LG_HITPROB = float(df['total_hit_prob'].median() or 25.0)
+        PRED_WEIGHT = cfg.get('hrr_pred_weight', 0.08)
+        PRED_MAX    = cfg.get('hrr_pred_max',    3.0)
+
+        def _pred_signal(row) -> float:
+            pos  = row.get('_order_pos')
+            team = row.get('Team', '')
+            if pd.isna(pos) or not team:
+                return 0.0
+            pos = int(pos)
+            # Slots 1-2: they ARE the table-setters — predecessor signal less relevant
+            if pos <= 2:
+                return 0.0
+            # Look up 1-2 predecessors
+            pred_probs = []
+            for p in [pos - 1, pos - 2]:
+                if p >= 1:
+                    hp = slot_hitprob.get((team, p))
+                    if hp is not None:
+                        pred_probs.append(hp)
+            if not pred_probs:
+                return 0.0
+            avg_pred = sum(pred_probs) / len(pred_probs)
+            return float(np.clip((avg_pred - LG_HITPROB) * PRED_WEIGHT, -PRED_MAX, PRED_MAX))
+
+        pred_obp = df.apply(_pred_signal, axis=1)
+
+    # Compose HRR_Score
+    hrr_raw = (
+        hit_s * cfg['hrr_hit_weight']
+      + order_hrr
+      + hr_s  * cfg['hrr_hr_weight']
+      + gc_hrr
+      + bvp_hrr
+      + bvp_hrr_rate   # direct H+RBI per AB vs this pitcher
+      + pred_obp        # lineup protection — predecessor hit probability
+    )
+    df['HRR_Score']      = normalize_0_100(hrr_raw).round(1)
+    df['HRR_Score_base'] = df['HRR_Score'].copy()   # park doesn't change HRR
+
     return df
 
 
@@ -419,8 +534,9 @@ def compute_game_condition_scores(df: pd.DataFrame, use_gc: bool=True) -> pd.Dat
     df = df.copy()
     has_gc = all(c in df.columns for c in _GC_COLS)
     if not has_gc:
-        for sc in ['Hit_Score','Single_Score','XB_Score','HR_Score']:
-            df[sc+'_gc'] = df[sc]
+        for sc in ['Hit_Score','Single_Score','XB_Score','HR_Score','HRR_Score']:
+            if sc in df.columns:
+                df[sc+'_gc'] = df[sc]
         return df
 
     strength = 1.0 if use_gc else CONFIG['gc_reduced_strength']
@@ -432,6 +548,11 @@ def compute_game_condition_scores(df: pd.DataFrame, use_gc: bool=True) -> pd.Dat
     df['Single_Score_gc'] = normalize_0_100(df['Single_Score'] * hit_mult)
     df['XB_Score_gc']     = normalize_0_100(df['XB_Score']     * hit_mult)
     df['HR_Score_gc']     = normalize_0_100(df['HR_Score']      * hr_mult)
+    # HRR uses a blend — run environment (hr_mult) dominates over contact (hit_mult)
+    if 'HRR_Score' in df.columns:
+        hrr_mult = 1.0 + (hit_comb * 0.4 + hr_comb * 0.6).clip(
+            -CONFIG['gc_hr_max_range'], CONFIG['gc_hr_max_range'])
+        df['HRR_Score_gc'] = normalize_0_100(df['HRR_Score'] * hrr_mult)
 
     # ── Hot park extra boost ──────────────────────────────────────────────────
     # When gc_hr4 > 2× league median (12.2%), a game environment is genuinely

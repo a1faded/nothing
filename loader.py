@@ -279,8 +279,20 @@ def merge_game_conditions(df: pd.DataFrame, game_cond, pitcher_qs) -> pd.DataFra
 
     df['gc_qs'] = CONFIG['gc_qs_anchor']
     if pitcher_qs is not None and not pitcher_qs.empty:
-        qs_map    = pitcher_qs.set_index('last_name')['qs_prob']
-        df['gc_qs'] = df['Pitcher'].map(qs_map).fillna(CONFIG['gc_qs_anchor'])
+        qs_lookup = pitcher_qs[['last_name', 'home_team', 'qs_prob']].copy()
+        qs_lookup['last_name'] = qs_lookup['last_name'].astype(str).str.strip()
+        qs_lookup['home_team'] = qs_lookup['home_team'].astype(str).str.strip()
+        qs_lookup = qs_lookup.drop_duplicates(subset=['last_name', 'home_team'], keep='last')
+
+        df['Pitcher'] = df['Pitcher'].astype(str).str.strip()
+        df = df.merge(
+            qs_lookup,
+            left_on=['Pitcher', '_home_abbr'],
+            right_on=['last_name', 'home_team'],
+            how='left'
+        )
+        df['gc_qs'] = df['qs_prob'].fillna(CONFIG['gc_qs_anchor'])
+        df.drop(columns=['last_name', 'home_team', 'qs_prob'], inplace=True, errors='ignore')
 
     df.drop(columns=['_home_nick','_home_abbr'], inplace=True, errors='ignore')
     return df

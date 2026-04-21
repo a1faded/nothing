@@ -755,19 +755,140 @@ h4 { font-size: .85rem !important; font-weight: 600 !important; }
 
 /* ── MOBILE RESPONSIVE ───────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  .block-container { padding: .4rem .6rem 2rem !important; }
-  .score-grid   { grid-template-columns: 1fr 1fr; gap: .4rem; }
-  .pcard-grid   { grid-template-columns: 1fr 1fr; gap: .4rem; }
+  /* ── Layout ────────────────────────────────────────────────────────────── */
+  .block-container { padding: .3rem .4rem 3rem !important; }
+
+  /* ── Stat bar — horizontal scroll on small screens ────────────────────── */
+  .stat-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: .3rem;
+    padding: .4rem .5rem;
+  }
+  .stat-item    { min-width: 58px; padding: .25rem .4rem; flex-shrink: 0; }
+  .stat-item .val { font-size: .95rem; }
+  .stat-item .lbl { font-size: .56rem; }
+
+  /* ── Score summary cards — 2-col grid ─────────────────────────────────── */
+  .score-grid   { grid-template-columns: 1fr 1fr; gap: .35rem; }
+  .scard        { padding: .65rem .7rem .5rem; min-height: 90px; }
+  .scard .sc-name { font-size: .85rem; }
+  .scard .sc-type { font-size: .58rem; }
+  .scard .sc-score { font-size: .75rem; top: .5rem; right: .55rem; }
+
+  /* ── Best per target cards — 2-col ────────────────────────────────────── */
+  .pcard-grid   { grid-template-columns: 1fr 1fr; gap: .35rem; }
+  .pcard        { padding: .7rem .75rem .55rem; }
+
+  /* ── Parlay legs — 1-col ───────────────────────────────────────────────── */
   .parlay-grid  { grid-template-columns: 1fr; }
-  .stat-item    { min-width: 64px; padding: .3rem .5rem; }
-  .stat-item .val { font-size: 1rem; }
-  .scard .sc-name { font-size: .88rem; }
-  .pt-table th, .pt-table td { padding: .35rem .5rem; font-size: .72rem; }
+
+  /* ── Tables — horizontal scroll ───────────────────────────────────────── */
+  [data-testid="stDataFrame"] > div {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── App header ─────────────────────────────────────────────────────────── */
+  .app-header h1 { font-size: 1.2rem !important; }
+  .app-header .meta { font-size: .62rem; }
+
+  /* ── Section headings ───────────────────────────────────────────────────── */
+  .section-head { font-size: .7rem !important; }
+
+  /* ── Pitcher table ──────────────────────────────────────────────────────── */
+  .pt-table th, .pt-table td { padding: .3rem .4rem; font-size: .68rem; }
+
+  /* ── Sidebar toggle — larger tap target ────────────────────────────────── */
+  [data-testid="collapsedControl"] {
+    width:  2.8rem !important;
+    height: 2.8rem !important;
+    top: 50% !important;
+  }
+
+  /* ── Buttons — full width on mobile ─────────────────────────────────────── */
+  [data-testid="stButton"] button,
+  [data-testid="stDownloadButton"] button {
+    width: 100%;
+    min-height: 44px;
+    font-size: .8rem;
+  }
+
+  /* ── Selectboxes / sliders — touch-friendly ─────────────────────────────── */
+  [data-testid="stSelectbox"] > div { min-height: 42px; }
+  [data-testid="stSlider"] [data-baseweb="slider"] { padding: 0 .5rem; }
+
+  /* ── Expanders ───────────────────────────────────────────────────────────── */
+  [data-testid="stExpander"] summary { font-size: .8rem; padding: .6rem .8rem; }
+
+  /* ── Metrics in 3-col layouts → wrap naturally ─────────────────────────── */
+  [data-testid="stMetric"] { min-width: 90px; }
 }
+
 @media (max-width: 480px) {
+  /* ── Phones in portrait — single column everything ─────────────────────── */
   .score-grid  { grid-template-columns: 1fr; }
   .pcard-grid  { grid-template-columns: 1fr; }
   .app-header .meta { display: none; }
+
+  /* ── Stat bar pills — even more compact ─────────────────────────────────── */
+  .stat-item { min-width: 50px; }
+  .stat-item .val { font-size: .85rem; }
+
+  /* ── Typography scale down ──────────────────────────────────────────────── */
+  .block-container p, .block-container li { font-size: .82rem; }
+  h1 { font-size: 1.1rem !important; }
+  h2 { font-size: .95rem !important; }
+  h3 { font-size: .85rem !important; }
+
+  /* ── Sidebar: ensure it opens as overlay, not push ─────────────────────── */
+  [data-testid="stSidebar"] {
+    position: fixed !important;
+    z-index: 999 !important;
+    width: min(85vw, 320px) !important;
+    height: 100vh !important;
+    overflow-y: auto;
+    box-shadow: 4px 0 24px rgba(0,0,0,.6) !important;
+  }
+
+  /* ── Make the reopen button more prominent on phone ────────────────────── */
+  [data-testid="collapsedControl"] {
+    width:  3rem !important;
+    height: 3rem !important;
+    border-radius: 0 12px 12px 0 !important;
+  }
+
+  /* ── Card body font size ────────────────────────────────────────────────── */
+  .scard .sc-name { font-size: .82rem; }
+  .pcard { padding: .6rem .65rem .5rem; }
+
+  /* ── Download / action button row ──────────────────────────────────────── */
+  [data-testid="column"] { padding: .15rem !important; }
+}
+
+/* ── Landscape phone / small tablet (568-768px) ─────────────────────────── */
+@media (min-width: 568px) and (max-width: 768px) {
+  .score-grid { grid-template-columns: repeat(3, 1fr); }
+  .pcard-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── Touch device optimisations (applies regardless of screen size) ──────── */
+@media (hover: none) and (pointer: coarse) {
+  /* Increase tap targets for all interactive elements */
+  [data-testid="stButton"] button,
+  [data-testid="stDownloadButton"] button  { min-height: 44px; }
+  [data-testid="stCheckbox"] label         { min-height: 40px; line-height: 40px; }
+  [data-testid="stToggle"]   label         { min-height: 36px; }
+
+  /* Remove hover transforms — they feel buggy on touch */
+  .scard:hover, .pcard:hover { transform: none; }
+
+  /* Larger sidebar toggle ─────────────────────────────────────────────────── */
+  [data-testid="collapsedControl"] {
+    width:  2.8rem !important;
+    height: 2.8rem !important;
+  }
 }
 </style>
 """, unsafe_allow_html=True)

@@ -666,6 +666,14 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
             bvp_body += _row("Career RBI", str(int(bvp_rbi or 0)))
             bvp_body += _row("Career K",   str(int(bvp_k   or 0)))
             bvp_body += _row("Career BB",  str(int(bvp_bb  or 0)))
+
+            if ab < 5:
+                sample_note = "Very small sample; use cautiously."
+            elif conf < 0.8:
+                sample_note = "Moderate sample; treat as directional."
+            else:
+                sample_note = "Strong sample for BvP context."
+
             if conf < 1.0:
                 bvp_body += _row("Sample Note", sample_note)
 

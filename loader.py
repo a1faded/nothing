@@ -145,17 +145,18 @@ def load_pitcher_data():
             errors='coerce').fillna(0)
         d['full_name'] = d['Name'].astype(str).str.strip()
         d['pitcher_key'] = d['full_name'].map(_build_pitcher_key)
+        d['last_name'] = d['full_name'].str.split().str[-1].fillna('')
         d['team']      = d['Team'].astype(str).str.strip()
         d['park']      = d['Park'].astype(str).str.strip().map(_normalize_team_abbr) if 'Park' in d.columns else ''
-        return d[['pitcher_key','full_name','team','park','prob_val']].rename(
+        return d[['pitcher_key','last_name','full_name','team','park','prob_val']].rename(
             columns={'prob_val': col_name})
 
     hits_c  = clean(hits_df,  'hit8_prob')
     hrs_c   = clean(hrs_df,   'hr2_prob')
     walks_c = clean(walks_df, 'walk3_prob')
 
-    merged = hits_c.merge(hrs_c,   on=['pitcher_key','full_name','team','park'], how='outer')
-    merged = merged.merge(walks_c, on=['pitcher_key','full_name','team','park'], how='outer')
+    merged = hits_c.merge(hrs_c,   on=['pitcher_key','last_name','full_name','team','park'], how='outer')
+    merged = merged.merge(walks_c, on=['pitcher_key','last_name','full_name','team','park'], how='outer')
 
     merged['hit8_prob']  = merged['hit8_prob'].fillna(CONFIG['pitcher_hit_neutral'])
     merged['hr2_prob']   = merged['hr2_prob'].fillna(CONFIG['pitcher_hr_neutral'])
@@ -191,21 +192,74 @@ def merge_pitcher_data(df: pd.DataFrame, pitcher_df) -> pd.DataFrame:
         'hr2_prob':   CONFIG['pitcher_hr_neutral'],
         'walk3_prob': CONFIG['pitcher_walk_neutral'],
     }
+    meta_defaults = {'_pitcher_full_name': pd.NA, '_pitcher_team': pd.NA}
     if pitcher_df is None or pitcher_df.empty:
-        for col, val in neutral.items():
+        for col, val in {**neutral, **meta_defaults}.items():
             df[col] = val
+        if '_pitcher_key' not in df.columns:
+            df['_pitcher_key'] = df['Pitcher'].astype(str).map(_build_pitcher_key)
         return df
 
-    unambiguous     = pitcher_df[~pitcher_df['_ambiguous']]
-    pm              = unambiguous.set_index('last_name')
-    ambiguous_names = set(pitcher_df.loc[pitcher_df['_ambiguous'], 'last_name'])
+    df = df.copy()
+    if '_home_abbr' not in df.columns:
+        df['_home_abbr'] = _home_abbr_from_game(df['Game'])
+    if '_pitcher_key' not in df.columns:
+        df['_pitcher_key'] = df['Pitcher'].astype(str).map(_build_pitcher_key)
 
-    def _g(p, col, default):
-        if p in ambiguous_names: return default
-        return pm.at[p, col] if p in pm.index else default
+    work = pitcher_df.copy()
+    if 'pitcher_key' not in work.columns:
+        source_name = work['full_name'] if 'full_name' in work.columns else work.get('last_name', '')
+        work['pitcher_key'] = pd.Series(source_name).astype(str).map(_build_pitcher_key)
+    if 'last_name' not in work.columns and 'full_name' in work.columns:
+        work['last_name'] = work['full_name'].astype(str).str.split().str[-1].fillna('')
+    work['pitcher_key'] = work['pitcher_key'].astype(str).str.strip()
+    work['park'] = work.get('park', '').astype(str).str.strip().map(_normalize_team_abbr)
+
+    # Deterministic primary match: pitcher_key + home park.
+    key_cols = ['pitcher_key', 'park']
+    keep_cols = key_cols + ['full_name', 'team'] + list(neutral.keys())
+    for c in keep_cols:
+        if c not in work.columns:
+            work[c] = pd.NA
+    work_keyed = work[keep_cols].drop_duplicates(subset=key_cols, keep='last')
+
+    df = df.merge(
+        work_keyed,
+        left_on=['_pitcher_key', '_home_abbr'],
+        right_on=['pitcher_key', 'park'],
+        how='left',
+        validate='m:1',
+    )
+
+    # Safe fallback: unique pitcher_key across all parks when keyed+park misses.
+    missing_mask = df['full_name'].isna() if 'full_name' in df.columns else pd.Series(False, index=df.index)
+    if missing_mask.any():
+        uniq = work.groupby('pitcher_key').filter(lambda g: len(g) == 1)
+        uniq = uniq.drop_duplicates(subset=['pitcher_key'], keep='last')
+        fallback_cols = ['pitcher_key', 'full_name', 'team'] + list(neutral.keys())
+        uniq = uniq[fallback_cols].rename(columns={c: f'{c}__fb' for c in fallback_cols if c != 'pitcher_key'})
+        df = df.merge(uniq, left_on='_pitcher_key', right_on='pitcher_key', how='left', validate='m:1')
+        for c in ['full_name', 'team'] + list(neutral.keys()):
+            fb = f'{c}__fb'
+            if fb in df.columns:
+                if c in df.columns:
+                    df[c] = df[c].fillna(df[fb])
+                else:
+                    df[c] = df[fb]
+                df.drop(columns=[fb], inplace=True, errors='ignore')
+        df.drop(columns=['pitcher_key_y'], inplace=True, errors='ignore')
+        if 'pitcher_key_x' in df.columns:
+            df.rename(columns={'pitcher_key_x': 'pitcher_key'}, inplace=True)
 
     for col, default in neutral.items():
-        df[col] = df['Pitcher'].apply(lambda p: _g(p, col, default))
+        df[col] = pd.to_numeric(df.get(col), errors='coerce').fillna(default) if col != 'pitch_grade' else df.get(col).fillna(default)
+    df['_pitcher_full_name'] = df.get('full_name')
+    df['_pitcher_team'] = df.get('team')
+    for col, val in meta_defaults.items():
+        if col not in df.columns:
+            df[col] = val
+
+    df.drop(columns=['pitcher_key', 'park', 'full_name', 'team'], inplace=True, errors='ignore')
     return df
 
 

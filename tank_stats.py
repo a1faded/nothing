@@ -102,12 +102,36 @@ def _bvp_confidence(ab: int) -> float:
 # BvP FETCH — cached per batter per day
 # ─────────────────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fetch_bvp_pair_raw(batter_mlbam: int, pitcher_mlbam: int) -> dict:
+    """Targeted BvP call for one batter/pitcher pair using the opponent param."""
+    try:
+        resp = requests.get(
+            _BVP_URL,
+            headers=_headers(),
+            params={
+                "playerID": str(batter_mlbam),
+                "playerRole": "batting",
+                "opponent": str(pitcher_mlbam),
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {}
+        body = resp.json().get("body", {})
+        opponents = body.get("opponents", [])
+        if isinstance(opponents, list) and opponents:
+            opp = opponents[0]
+            if str(opp.get('playerID')) == str(pitcher_mlbam):
+                return opp.get('stats') or {}
+        return {}
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_bvp_raw(batter_mlbam: int) -> dict:
-    """
-    Fetch all BvP data for one batter. Cached 24h — data doesn't change mid-day.
-    Returns raw opponents list: [{playerID, stats}] or [].
-    """
+    """Fallback all-opponents BvP fetch for one batter."""
     try:
         resp = requests.get(
             _BVP_URL,
@@ -119,7 +143,6 @@ def _fetch_bvp_raw(batter_mlbam: int) -> dict:
             return {}
         body = resp.json().get("body", {})
         opponents = body.get("opponents", [])
-        # Build a dict keyed by pitcher MLBAM for O(1) lookup
         return {
             int(o["playerID"]): o["stats"]
             for o in opponents
@@ -132,23 +155,16 @@ def _fetch_bvp_raw(batter_mlbam: int) -> dict:
 def get_bvp_stats(batter_mlbam: int, pitcher_mlbam: int) -> dict | None:
     """
     Return career BvP stats for one specific batter vs one specific pitcher.
-    Returns None when no history exists or AB < _BVP_MIN_AB.
-
-    Returned dict (all numeric):
-      ab, h, avg, ops, hr, rbi, k, bb, obp, slg, doubles, triples, confidence
+    Returns None when no history exists. Low-sample rows are preserved for display
+    but get confidence 0.0 below the scoring threshold.
     """
-    opponents = _fetch_bvp_raw(batter_mlbam)
-    if not opponents:
-        return None
-
-    raw = opponents.get(pitcher_mlbam)
+    raw = _fetch_bvp_pair_raw(batter_mlbam, pitcher_mlbam)
+    if not raw:
+        raw = (_fetch_bvp_raw(batter_mlbam) or {}).get(pitcher_mlbam)
     if not raw:
         return None
 
     ab = _safe_int(raw.get("AB", 0))
-    if ab < _BVP_MIN_AB:
-        return None
-
     return {
         "ab":         ab,
         "h":          _safe_int(raw.get("H",   0)),
@@ -163,6 +179,7 @@ def get_bvp_stats(batter_mlbam: int, pitcher_mlbam: int) -> dict | None:
         "doubles":    _safe_int(raw.get("2B",   0)),
         "triples":    _safe_int(raw.get("3B",   0)),
         "confidence": _bvp_confidence(ab),
+        "low_sample": ab < _BVP_MIN_AB,
     }
 
 
@@ -233,7 +250,7 @@ def build_bvp_map(df: pd.DataFrame,
     Calls get_bvp_stats() per batter — each call is individually cached 24h
     so repeated calls (e.g. sidebar filter changes) don't re-hit the API.
     """
-    result: dict[int, dict] = {}
+    result: dict[tuple[int, int], dict] = {}
     unique_batters = tuple(dict.fromkeys(str(b) for b in df.get("Batter", pd.Series(dtype=str)).dropna().tolist()))
     for batter in unique_batters:
         batter_id = player_id_map.get(batter)
@@ -243,7 +260,7 @@ def build_bvp_map(df: pd.DataFrame,
         try:
             stats = get_bvp_stats(int(batter_id), int(pitcher_id))
             if stats:
-                result[int(batter_id)] = stats
+                result[(int(batter_id), int(pitcher_id))] = stats
         except Exception:
             continue
     return result
@@ -301,7 +318,8 @@ def build_splits_map(df: pd.DataFrame,
 
 def enrich_with_bvp(df: pd.DataFrame,
                     player_id_map: dict,
-                    bvp_map: dict) -> pd.DataFrame:
+                    bvp_map: dict,
+                    pitcher_id_map: dict | None = None) -> pd.DataFrame:
     """
     Join BvP stats to slate df by batter MLBAM ID.
 
@@ -314,6 +332,7 @@ def enrich_with_bvp(df: pd.DataFrame,
     """
     if not bvp_map or df.empty:
         return df
+    pitcher_id_map = pitcher_id_map or {}
 
     df = df.copy()
     bvp_cols = {
@@ -329,10 +348,15 @@ def enrich_with_bvp(df: pd.DataFrame,
 
     for idx, row in df.iterrows():
         batter   = row.get("Batter", "")
-        mlbam    = player_id_map.get(batter)
+        mlbam    = row.get('_batter_mlbam') or player_id_map.get(batter)
         if mlbam is None:
             continue
-        stats = bvp_map.get(int(mlbam))
+        pitcher_mlbam = row.get('_pitcher_mlbam') or row.get('_pitcher_id') or pitcher_id_map.get(batter)
+        try:
+            pitcher_mlbam = int(pitcher_mlbam) if pd.notna(pitcher_mlbam) else None
+        except Exception:
+            pitcher_mlbam = None
+        stats = bvp_map.get((int(mlbam), pitcher_mlbam)) if pitcher_mlbam else None
         if not stats:
             continue
         df.at[idx, "bvp_ab"]   = stats["ab"]
@@ -383,6 +407,10 @@ def enrich_with_splits(df: pd.DataFrame,
         "split_avg": float("nan"), "split_ops": float("nan"),
         "split_k": float("nan"), "split_bb": float("nan"),
         "split_obp": float("nan"), "split_slg": float("nan"),
+        "split_ab": float("nan"), "split_h": float("nan"), "split_hr": float("nan"),
+        "split_r": float("nan"), "split_rbi": float("nan"), "split_so": float("nan"),
+        "split_sb": float("nan"), "split_cs": float("nan"), "split_hbp": float("nan"),
+        "split_2b": float("nan"), "split_3b": float("nan"), "split_bucket": None,
         "pitcher_split_avg": float("nan"),
         "pitcher_split_k":   float("nan"),
         "pitcher_split_bb":  float("nan"),
@@ -413,19 +441,31 @@ def enrich_with_splits(df: pd.DataFrame,
                 pass
 
         # Batter splits: how does this batter hit vs this pitcher's hand?
-        if batter_id and p_hand in ("L", "R"):
+        if batter_id:
             splits = batter_splits_map.get(int(batter_id), {})
-            split_key = f"vs. {'Right' if p_hand == 'R' else 'Left'}"
-            s = splits.get(split_key, {})
+            split_key = f"vs. {'Right' if p_hand == 'R' else 'Left'}" if p_hand in ('L','R') else 'All Splits'
+            s = splits.get(split_key) or splits.get('All Splits', {})
             if s:
                 ab_s = _safe_int(s.get("AB", 0))
                 if ab_s > 0:
+                    df.at[idx, "split_bucket"] = split_key if split_key in splits else 'All Splits'
                     df.at[idx, "split_avg"] = _safe_float(str(s.get("AVG", 0)))
                     df.at[idx, "split_ops"] = _safe_float(str(s.get("OPS", 0)))
                     df.at[idx, "split_k"]   = _safe_int(s.get("SO", 0))
                     df.at[idx, "split_bb"]  = _safe_int(s.get("BB", 0))
                     df.at[idx, "split_obp"] = _safe_float(str(s.get("OBP", 0)))
                     df.at[idx, "split_slg"] = _safe_float(str(s.get("SLG", 0)))
+                    df.at[idx, "split_ab"]  = ab_s
+                    df.at[idx, "split_h"]   = _safe_int(s.get("H", 0))
+                    df.at[idx, "split_hr"]  = _safe_int(s.get("HR", 0))
+                    df.at[idx, "split_r"]   = _safe_int(s.get("R", 0))
+                    df.at[idx, "split_rbi"] = _safe_int(s.get("RBI", 0))
+                    df.at[idx, "split_so"]  = _safe_int(s.get("SO", 0))
+                    df.at[idx, "split_sb"]  = _safe_int(s.get("SB", 0))
+                    df.at[idx, "split_cs"]  = _safe_int(s.get("CS", 0))
+                    df.at[idx, "split_hbp"] = _safe_int(s.get("HBP", 0))
+                    df.at[idx, "split_2b"]  = _safe_int(s.get("2B", 0))
+                    df.at[idx, "split_3b"]  = _safe_int(s.get("3B", 0))
 
         # Pitcher splits: how does this pitcher perform vs this batter's hand?
         # We don't have batter hand yet — use pitcher's overall splits for now.

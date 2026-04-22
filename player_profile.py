@@ -666,6 +666,8 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
             bvp_body += _row("Career RBI", str(int(bvp_rbi or 0)))
             bvp_body += _row("Career K",   str(int(bvp_k   or 0)))
             bvp_body += _row("Career BB",  str(int(bvp_bb  or 0)))
+            if conf < 1.0:
+                bvp_body += _row("Sample Note", sample_note)
 
             st.markdown(_card("vs Today's Starter", bvp_body, "⚔️"),
                         unsafe_allow_html=True)
@@ -686,6 +688,14 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
         split_ops = row.get('split_ops')
         split_obp = row.get('split_obp')
         split_slg = row.get('split_slg')
+        split_ab  = row.get('split_ab')
+        split_h   = row.get('split_h')
+        split_hr  = row.get('split_hr')
+        split_r   = row.get('split_r')
+        split_rbi = row.get('split_rbi')
+        split_bb_ct = row.get('split_bb')
+        split_so_ct = row.get('split_so')
+        split_bucket = row.get('split_bucket')
         p_hand    = row.get('_pitcher_hand')
         hand_lbl  = ("vs RHP" if p_hand == 'R' else
                      "vs LHP" if p_hand == 'L' else "vs Pitcher")
@@ -712,6 +722,14 @@ def player_profile_page(df: pd.DataFrame, player_id_map: dict, filters: dict,
                                 vcol="#4ade80" if split_ops_val > 0.750 else "#f87171")
             splits_body += _row(f"{hand_lbl} OBP", f"{float(split_obp or 0):.3f}")
             splits_body += _row(f"{hand_lbl} SLG", f"{float(split_slg or 0):.3f}")
+            if pd.notna(split_ab):
+                splits_body += _row(f"{hand_lbl} AB", str(int(split_ab or 0)))
+                splits_body += _row(f"{hand_lbl} H", str(int(split_h or 0)))
+                splits_body += _row(f"{hand_lbl} HR", str(int(split_hr or 0)))
+                splits_body += _row(f"{hand_lbl} R", str(int(split_r or 0)))
+                splits_body += _row(f"{hand_lbl} RBI", str(int(split_rbi or 0)))
+                splits_body += _row(f"{hand_lbl} BB", str(int(split_bb_ct or 0)))
+                splits_body += _row(f"{hand_lbl} SO", str(int(split_so_ct or 0)))
             st.markdown(_card(f"Season Splits — {hand_lbl}", splits_body, "📊"),
                         unsafe_allow_html=True)
         else:

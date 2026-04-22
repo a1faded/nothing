@@ -102,43 +102,49 @@ def _enrich_with_tank_stats(df, player_id_map: dict) -> pd.DataFrame:
     """
     Fetch BvP and splits data from Tank01 and join to df.
 
-    Pitcher ID map is built directly from df['Pitcher'] using the Tank01
-    player list — no schedule API dependency, works even when lineups
-    are not yet confirmed. This fixes the "No history" issue.
+    Uses resolved MLBAM IDs wherever possible and writes helper ID columns back
+    to the slate so downstream UI can use deterministic keys instead of names.
     """
     try:
         from mlb_api import _lookup_player_mlbam
         from tank_stats import (build_bvp_map, build_splits_map,
                                  enrich_with_bvp, enrich_with_splits)
 
-        # Build pitcher_id_map from df['Pitcher'] — always available from BallPark Pal
-        # {batter_name: pitcher_mlbam} derived from the Pitcher column each row already has
+        df = df.copy()
+        if '_batter_mlbam' not in df.columns:
+            df['_batter_mlbam'] = df['Batter'].map(player_id_map)
+
         pitcher_id_map: dict[str, int] = {}
+        pitcher_full_map: dict[str, int] = {}
         if 'Pitcher' in df.columns and 'Batter' in df.columns:
             for _, row in df.iterrows():
+                batter_name  = str(row.get('Batter', '') or '').strip()
                 pitcher_name = str(row.get('_pitcher_full_name') or row.get('Pitcher', '') or '').strip()
-                batter_name  = str(row.get('Batter',  '') or '').strip()
-                if not pitcher_name or not batter_name:
+                if not batter_name or not pitcher_name:
                     continue
                 pid = _lookup_player_mlbam(pitcher_name)
                 if pid:
-                    pitcher_id_map[batter_name] = pid
-                    # Also map by last name for fallback
-                    last = batter_name.split()[-1]
-                    pitcher_id_map[last] = pid
+                    pitcher_id_map[batter_name] = int(pid)
+                    pitcher_full_map[pitcher_name] = int(pid)
+
+        if pitcher_full_map:
+            df['_pitcher_mlbam'] = df.apply(
+                lambda r: pitcher_full_map.get(str(r.get('_pitcher_full_name') or r.get('Pitcher') or '').strip()),
+                axis=1,
+            )
+        else:
+            df['_pitcher_mlbam'] = pd.NA
 
         if not pitcher_id_map:
             return df
 
         bvp_map = build_bvp_map(df, player_id_map, pitcher_id_map)
-        df      = enrich_with_bvp(df, player_id_map, bvp_map)
-        batter_splits, pitcher_splits = build_splits_map(
-            df, player_id_map, pitcher_id_map)
-        df = enrich_with_splits(
-            df, player_id_map, pitcher_id_map,
-            batter_splits, pitcher_splits)
+        df = enrich_with_bvp(df, player_id_map, bvp_map)
+        batter_splits, pitcher_splits = build_splits_map(df, player_id_map, pitcher_id_map)
+        df = enrich_with_splits(df, player_id_map, pitcher_id_map, batter_splits, pitcher_splits)
         return df
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning('Tank stats enrichment failed: %s', exc)
         return df
 
 
@@ -192,13 +198,19 @@ def _merge_signal_metadata(df, order_map: dict, form_map: dict,
     if missing_hand.any():
         try:
             from mlb_api import _lookup_pitcher_hand as _lph
-            unique_pitchers = df.loc[missing_hand, ['Pitcher','_pitcher_full_name']].drop_duplicates()
+            unique_pitchers = []
+            seen = set()
+            for _, prow in df.loc[missing_hand, ['Pitcher', '_pitcher_full_name']].drop_duplicates().iterrows():
+                for pitcher in [prow.get('_pitcher_full_name'), prow.get('Pitcher')]:
+                    pitcher = str(pitcher or '').strip()
+                    if pitcher and pitcher not in seen:
+                        seen.add(pitcher)
+                        unique_pitchers.append(pitcher)
             hand_cache = {}
             for pitcher in unique_pitchers:
-                if pitcher and pitcher not in hand_cache:
-                    hand = _lph(pitcher)
-                    if hand:
-                        hand_cache[pitcher] = hand
+                hand = _lph(pitcher)
+                if hand:
+                    hand_cache[pitcher] = hand
             if hand_cache:
                 df['_pitcher_hand'] = df.apply(
                     lambda r: (hand_cache.get(r['Pitcher'])

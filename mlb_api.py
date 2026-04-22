@@ -315,7 +315,7 @@ def _lookup_player_mlbam(full_name: str) -> int | None:
         return pid
     # Try last-name-only for edge cases like "Framber Valdez" vs "Valdez"
     last = full_name.split()[-1].lower()
-    pid  = _TANK_PLAYER_MAP_LAST.get(last)
+    pid  = _TANK_PLAYER_MAP_LAST_UNIQUE.get(last)
     if pid:
         return pid
     # Fallback: statsapi call (slower, for recent call-ups)
@@ -812,7 +812,7 @@ def get_hrr_game_log_map(player_ids: tuple, last_n: int = 10) -> dict:
 def build_player_id_map(batter_names: tuple) -> dict:
     result: dict[str,int] = {}
     for name in batter_names:
-        mlbam = _via_statsapi(name) or _via_pybaseball(name)
+        mlbam = _lookup_player_mlbam(name) or _via_statsapi(name) or _via_pybaseball(name)
         if mlbam is not None:
             result[name] = mlbam
     return result

@@ -80,8 +80,19 @@ html, body, [class*="css"] {
   color: var(--text) !important;
 }
 
-/* Remove Streamlit default top padding/decoration */
-#MainMenu, footer, header { visibility: hidden; }
+/* Remove Streamlit default menu/footer while keeping the header visible.
+   Streamlit renders the sidebar open/close control inside the header on many
+   releases. Hiding the entire header can make the reopen button disappear. */
+#MainMenu, footer { visibility: hidden; }
+header, [data-testid="stHeader"] {
+  visibility: visible !important;
+  background: transparent !important;
+  pointer-events: none !important;
+}
+header * , [data-testid="stHeader"] * {
+  pointer-events: auto !important;
+}
+[data-testid="stDecoration"] { display: none !important; }
 .block-container {
   padding: .75rem 1.25rem 3rem !important;
   max-width: 1440px !important;
@@ -117,32 +128,53 @@ html, body, [class*="css"] {
 }
 
 /* ── SIDEBAR COLLAPSE TOGGLE — make reopen button always visible ─────────── */
-/* The collapse/expand arrow button that Streamlit renders at the sidebar edge */
-[data-testid="collapsedControl"] {
+/* Streamlit has used a few different test IDs / aria labels for this control
+   across releases. Style all known variants and keep them above the app body. */
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stSidebarCollapseButton"],
+button[aria-label="Open sidebar"],
+button[aria-label="Close sidebar"] {
   display:          flex !important;
   align-items:      center !important;
   justify-content:  center !important;
-  width:            2.2rem !important;
-  height:           2.2rem !important;
-  background:       var(--surf2) !important;
-  border:           1px solid var(--border2) !important;
-  border-radius:    0 8px 8px 0 !important;
-  color:            var(--hit) !important;
+  width:            2.75rem !important;
+  height:           2.75rem !important;
+  min-width:        2.75rem !important;
+  min-height:       2.75rem !important;
+  background:       linear-gradient(135deg, var(--accent), var(--hit)) !important;
+  border:           2px solid rgba(255,255,255,.28) !important;
+  border-radius:    0 13px 13px 0 !important;
+  color:            #020617 !important;
   cursor:           pointer !important;
+  opacity:          1 !important;
+  visibility:       visible !important;
+  z-index:          100000 !important;
+  box-shadow:       0 0 0 1px rgba(0,0,0,.45), 0 6px 24px rgba(16,185,129,.45) !important;
+  transition:       transform .15s ease, box-shadow .2s ease, filter .2s ease !important;
+}
+[data-testid="collapsedControl"] {
   top:              50% !important;
   transform:        translateY(-50%) !important;
-  box-shadow:       2px 0 12px rgba(0,0,0,.4) !important;
-  transition:       background .2s, box-shadow .2s !important;
 }
-[data-testid="collapsedControl"]:hover {
-  background:   var(--surf3) !important;
-  box-shadow:   2px 0 20px rgba(16,185,129,.25) !important;
+[data-testid="collapsedControl"]:hover,
+[data-testid="stSidebarCollapsedControl"]:hover,
+[data-testid="stSidebarCollapseButton"]:hover,
+button[aria-label="Open sidebar"]:hover,
+button[aria-label="Close sidebar"]:hover {
+  filter: brightness(1.12) !important;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 8px 30px rgba(16,185,129,.65) !important;
 }
-[data-testid="collapsedControl"] svg {
-  width:  1.1rem !important;
-  height: 1.1rem !important;
-  color:  var(--hit) !important;
-  fill:   var(--hit) !important;
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="stSidebarCollapseButton"] svg,
+button[aria-label="Open sidebar"] svg,
+button[aria-label="Close sidebar"] svg {
+  width:  1.35rem !important;
+  height: 1.35rem !important;
+  color:  #020617 !important;
+  fill:   #020617 !important;
+  stroke: #020617 !important;
 }
 
 /* Sidebar radio — style like a nav menu */
@@ -801,7 +833,11 @@ h4 { font-size: .85rem !important; font-weight: 600 !important; }
   .pt-table th, .pt-table td { padding: .3rem .4rem; font-size: .68rem; }
 
   /* ── Sidebar toggle — larger tap target ────────────────────────────────── */
-  [data-testid="collapsedControl"] {
+  [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stSidebarCollapseButton"],
+  button[aria-label="Open sidebar"],
+  button[aria-label="Close sidebar"] {
     width:  2.8rem !important;
     height: 2.8rem !important;
     top: 50% !important;
@@ -853,7 +889,11 @@ h4 { font-size: .85rem !important; font-weight: 600 !important; }
   }
 
   /* ── Make the reopen button more prominent on phone ────────────────────── */
-  [data-testid="collapsedControl"] {
+  [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stSidebarCollapseButton"],
+  button[aria-label="Open sidebar"],
+  button[aria-label="Close sidebar"] {
     width:  3rem !important;
     height: 3rem !important;
     border-radius: 0 12px 12px 0 !important;
@@ -885,7 +925,11 @@ h4 { font-size: .85rem !important; font-weight: 600 !important; }
   .scard:hover, .pcard:hover { transform: none; }
 
   /* Larger sidebar toggle ─────────────────────────────────────────────────── */
-  [data-testid="collapsedControl"] {
+  [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stSidebarCollapseButton"],
+  button[aria-label="Open sidebar"],
+  button[aria-label="Close sidebar"] {
     width:  2.8rem !important;
     height: 2.8rem !important;
   }

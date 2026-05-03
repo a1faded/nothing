@@ -24,3 +24,7 @@ This build changes the app from an "every widget change rebuilds the slate" flow
 ## Deployment note
 
 After deploying to Streamlit Cloud, use the app's **Refresh Live Data** button once or clear cache/reboot from Streamlit if you suspect stale data from an older build.
+
+
+## Hotfix: Immediate Filters
+The first performance-flow build used an Apply Filters form. That reduced reruns but made filter changes appear unresponsive. This build removes the form and lets filter widgets update immediately while keeping the expensive enriched slate cached behind explicit Refresh Live Data controls.

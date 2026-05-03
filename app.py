@@ -44,43 +44,6 @@ LOGGER = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PERFORMANCE / CACHE FLOW
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _get_refresh_nonce() -> int:
-    """Small session counter used to bust cached slate prep on demand."""
-    if 'data_refresh_nonce' not in st.session_state:
-        st.session_state['data_refresh_nonce'] = 0
-    return int(st.session_state.get('data_refresh_nonce', 0))
-
-
-def _request_data_refresh():
-    """Force all cached data/API layers to refresh on the next rerun."""
-    st.session_state['data_refresh_nonce'] = _get_refresh_nonce() + 1
-    st.session_state['last_manual_refresh'] = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
-    st.cache_data.clear()
-    st.rerun()
-
-
-def _render_data_controls():
-    """User-facing controls for cached-data refresh behavior."""
-    with st.expander('⚡ Data / Performance Controls', expanded=False):
-        st.caption(
-            'The app now keeps the expensive slate/API build cached. Filter changes should be fast; use Refresh Live Data when you want a fresh pull.'
-        )
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            if st.button('🔄 Refresh Live Data', key='refresh_live_data_top', width='stretch'):
-                _request_data_refresh()
-        with c2:
-            last = st.session_state.get('last_manual_refresh')
-            if last:
-                st.info(f'Last manual refresh: {last}')
-            else:
-                st.info('Using cached data until TTL expires or you refresh manually.')
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # DATA PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -310,57 +273,6 @@ def _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status: di
     return status
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _fetch_signal_data_cached(refresh_nonce: int = 0) -> tuple[dict, dict, dict, dict]:
-    """Cached wrapper for live signal dictionaries.
-
-    A short TTL keeps lineups/form reasonably fresh without refetching on every
-    widget rerun. refresh_nonce lets the Refresh Live Data button bust cache.
-    """
-    return _fetch_signal_data()
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_base_data_cached(refresh_nonce: int = 0):
-    """Load the CSV-backed base layers once per cache window."""
-    return load_matchups(), load_pitcher_data(), load_game_conditions(), load_pitcher_qs()
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _prepare_slate_data(use_park: bool = True, use_gc: bool = True,
-                        refresh_nonce: int = 0, include_tank: bool = True,
-                        include_props: bool = True):
-    """Build and enrich the slate once, then reuse it for display/filter reruns.
-
-    This is the main performance boundary. Normal filter/sort changes should hit
-    this cache instead of rebuilding API-driven enrichment.
-    """
-    raw_df, pitcher_df, game_cond, qs_df = _load_base_data_cached(refresh_nonce)
-    if raw_df is None:
-        return raw_df, pitcher_df, game_cond, qs_df, None, {}, {}, {}, {}, {}, {}
-
-    order_map, form_map, handedness_map, signal_status = _fetch_signal_data_cached(refresh_nonce)
-    df = _build_scored_df(
-        raw_df, pitcher_df, game_cond, qs_df,
-        use_park=use_park,
-        use_gc=use_gc,
-        order_map=order_map,
-        form_map=form_map,
-        handedness_map=handedness_map,
-    )
-    player_id_map = _get_player_id_map(df)
-    df = _enrich_with_ids(df, player_id_map)
-    df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
-    if include_tank:
-        df = _enrich_with_tank_stats(df, player_id_map)
-    if include_props:
-        df = _enrich_with_prop_odds(df, player_id_map)
-
-    source_status = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
-    return (raw_df, pitcher_df, game_cond, qs_df, df, player_id_map,
-            source_status, order_map, form_map, handedness_map, signal_status)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # PREDICTOR PAGE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,30 +283,36 @@ def main_page():
     # ── Staleness warning ─────────────────────────────────────────────────────
     render_staleness_warning()
 
-    _render_data_controls()
+    with st.spinner("⚾ Loading today's matchups…"):
+        raw_df     = load_matchups()
+        pitcher_df = load_pitcher_data()
+        game_cond  = load_game_conditions()
+        qs_df      = load_pitcher_qs()
 
-    # Load only the lightweight Matchups CSV before drawing controls. The full
-    # enriched slate is prepared after filters are applied and cached separately.
-    raw_df = load_matchups()
-    if raw_df is None:
-        st.error("❌ Could not load Matchups data.")
-        return
+        if raw_df is None:
+            st.error("❌ Could not load Matchups data.")
+            return
 
-    filters = build_predictor_control_panel(raw_df)
+        filters = build_predictor_control_panel(raw_df)
 
-    with st.spinner("⚾ Preparing cached slate data…"):
-        (raw_df, pitcher_df, game_cond, qs_df, df, player_id_map, source_status,
-         order_map, form_map, handedness_map, signal_status) = _prepare_slate_data(
+        # Fetch signal data (batting order, form, handedness)
+        order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
+
+        df = _build_scored_df(
+            raw_df, pitcher_df, game_cond, qs_df,
             use_park=filters['use_park'],
             use_gc=filters.get('use_gc', True),
-            refresh_nonce=_get_refresh_nonce(),
-            include_tank=True,
-            include_props=True,
+            order_map=order_map,
+            form_map=form_map,
+            handedness_map=handedness_map,
         )
-        if raw_df is None or df is None:
-            st.error("❌ Could not prepare slate data.")
-            return
-        st.session_state['source_status'] = source_status
+
+        player_id_map = _get_player_id_map(df)
+        df = _enrich_with_ids(df, player_id_map)
+        df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
+        df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
+        df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+        st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
 
     # ── Apply confirmed lineup filter if toggled ──────────────────────────────
     # Uses get_confirmed_game_abbrs() which derives confirmation from
@@ -474,8 +392,9 @@ def main_page():
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔄 Refresh Data", key="refresh_data_bottom"):
-            _request_data_refresh()
+        if st.button("🔄 Refresh Data"):
+            st.cache_data.clear()
+            st.rerun()
     with c2:
         if not filtered_df.empty:
             from renders import _build_export_xlsx
@@ -572,7 +491,10 @@ def main():
     )
     page = st.session_state.get('page', PAGES[0])
 
-    raw_df, pitcher_df, game_cond, qs_df = _load_base_data_cached(_get_refresh_nonce())
+    raw_df     = load_matchups()
+    pitcher_df = load_pitcher_data()
+    game_cond  = load_game_conditions()
+    qs_df      = load_pitcher_qs()
 
     if page == "⚾ Predictor":
         main_page()
@@ -582,14 +504,18 @@ def main():
         if raw_df is None:
             st.error("❌ Could not load Matchups data.")
         else:
-            _render_data_controls()
-            with st.spinner("Loading cached player-profile slate…"):
-                (raw_df, pitcher_df, game_cond, qs_df, df, player_id_map, source_status,
-                 order_map, form_map, handedness_map, signal_status) = _prepare_slate_data(
-                    use_park=True, use_gc=True, refresh_nonce=_get_refresh_nonce(),
-                    include_tank=True, include_props=True
-                )
-                st.session_state['source_status'] = source_status
+            with st.spinner("Loading slate data…"):
+                order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
+                df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
+                                      use_park=True, use_gc=True,
+                                      order_map=order_map, form_map=form_map,
+                                      handedness_map=handedness_map)
+                player_id_map = _get_player_id_map(df)
+                df = _enrich_with_ids(df, player_id_map)
+                df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
+                df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
+                df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+                st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
             filters = {'use_gc':True,'use_park':True,
                        'score_col':'Hit_Score','score_col_base':'Hit_Score'}
             player_profile_page(df, player_id_map, filters,
@@ -602,28 +528,30 @@ def main():
         if raw_df is None:
             st.error("❌ Could not load Matchups data.")
         else:
-            _render_data_controls()
-            with st.spinner("Loading cached under-target slate…"):
-                (raw_df, pitcher_df, game_cond, qs_df, df, player_id_map, source_status,
-                 order_map, form_map, handedness_map, signal_status) = _prepare_slate_data(
-                    use_park=True, use_gc=True, refresh_nonce=_get_refresh_nonce(),
-                    include_tank=True, include_props=True
-                )
-                st.session_state['source_status'] = source_status
+            with st.spinner("Loading slate data…"):
+                order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
+                df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
+                                      use_park=True, use_gc=True,
+                                      order_map=order_map, form_map=form_map,
+                                      handedness_map=handedness_map)
+                player_id_map = _get_player_id_map(df)
+                df = _enrich_with_ids(df, player_id_map)
+                df = _merge_signal_metadata(df, order_map, form_map, handedness_map)
+                df = _enrich_with_tank_stats(df, player_id_map)   # BvP + splits
+                df = _enrich_with_prop_odds(df, player_id_map)    # Tank01 odds join
+                st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
             under_page(df, filters_base={})
 
     elif page == "⚡ Parlay Builder":
         if raw_df is None:
             st.error("❌ Could not load data for Parlay Builder.")
         else:
-            _render_data_controls()
-            with st.spinner("Loading cached parlay slate…"):
-                (raw_df, pitcher_df, game_cond, qs_df, df, player_id_map, source_status,
-                 order_map, form_map, handedness_map, signal_status) = _prepare_slate_data(
-                    use_park=True, use_gc=True, refresh_nonce=_get_refresh_nonce(),
-                    include_tank=False, include_props=False
-                )
-                st.session_state['source_status'] = source_status
+            order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
+            df = _build_scored_df(raw_df, pitcher_df, game_cond, qs_df,
+                                  use_park=True, use_gc=True,
+                                  order_map=order_map, form_map=form_map,
+                                  handedness_map=handedness_map)
+            st.session_state['source_status'] = _build_source_status(raw_df, pitcher_df, game_cond, qs_df, signal_status, df)
             excl = st.session_state.get('excluded_players', [])
             if excl:
                 df = df[~df['Batter'].isin(excl)]

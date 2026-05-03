@@ -11,7 +11,8 @@ import pandas as pd
 from config import CONFIG
 
 
-def build_filters(df: pd.DataFrame, container=None, key_prefix: str = "sidebar", show_title: bool = True) -> dict:
+def build_filters(df: pd.DataFrame, container=None, key_prefix: str = "sidebar", show_title: bool = True,
+                  allow_clear_button: bool = True) -> dict:
     """
     Build the predictor filter controls in any Streamlit container.
 
@@ -143,12 +144,15 @@ def build_filters(df: pd.DataFrame, container=None, key_prefix: str = "sidebar",
         st.session_state.excluded_players = []
         st.session_state[widget_key] = []
 
-    ui.button(
-        "🔄 Clear All Exclusions",
-        key=f"{key_prefix}_clear_exclusions",
-        on_click=_clear_exclusions,
-        args=(f"{key_prefix}_lineup_exclusions",),
-    )
+    if allow_clear_button:
+        ui.button(
+            "🔄 Clear All Exclusions",
+            key=f"{key_prefix}_clear_exclusions",
+            on_click=_clear_exclusions,
+            args=(f"{key_prefix}_lineup_exclusions",),
+        )
+    else:
+        ui.caption("Exclusion changes apply when you click Apply Filters below.")
 
     # ── Display ───────────────────────────────────────────────────────────────
     ui.markdown("#### 🔢 Display")
@@ -182,13 +186,39 @@ def build_filters(df: pd.DataFrame, container=None, key_prefix: str = "sidebar",
 
 
 def build_predictor_control_panel(df: pd.DataFrame) -> dict:
-    """Primary predictor controls shown in the main page for mobile usability."""
+    """Primary predictor controls shown in the main page for mobile usability.
+
+    The controls are wrapped in a form so Streamlit does not rerun and rebuild
+    the expensive slate pipeline for every slider/dropdown interaction. Users
+    make several changes and then click Apply Filters once.
+    """
     st.markdown(
         '<div class="mobile-control-intro">📱 <b>Controls & Filters</b> — primary controls are here so the app is usable on phones without opening the Streamlit sidebar.</div>',
         unsafe_allow_html=True,
     )
     with st.expander("⚙️ Open / close predictor controls", expanded=True):
-        return build_filters(df, container=st, key_prefix="main_filters", show_title=False)
+        st.caption("Change filters, then click Apply Filters. This keeps the app from rebuilding the slate after every small control change.")
+        with st.form("predictor_filter_apply_form", clear_on_submit=False):
+            filters = build_filters(
+                df,
+                container=st,
+                key_prefix="main_filters",
+                show_title=False,
+                allow_clear_button=False,
+            )
+            submitted = st.form_submit_button("✅ Apply Filters", width="stretch")
+        if submitted:
+            st.session_state["predictor_filters_applied"] = st.session_state.get("predictor_filters_applied", 0) + 1
+            st.success("Filters applied.")
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            if st.button("🔄 Clear exclusions", key="main_filters_clear_exclusions_outside", width="stretch"):
+                st.session_state.excluded_players = []
+                st.session_state["main_filters_lineup_exclusions"] = []
+                st.rerun()
+        with c2:
+            st.caption("Most filter changes now update only after Apply Filters, which makes mobile and desktop interactions much faster.")
+        return filters
 
 def render_lineup_status_sidebar():
     try:

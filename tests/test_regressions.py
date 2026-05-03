@@ -2,6 +2,11 @@ import sys
 import types
 import unittest
 import pandas as pd
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _noop_decorator(*args, **kwargs):
@@ -45,3 +50,15 @@ class RegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+def test_pitcher_key_handles_multi_token():
+    from loader import _build_pitcher_key
+    assert _build_pitcher_key('Simeon Woods Rich.') == 'Woods Rich.'
+    assert _build_pitcher_key('Reynaldo Lopez') == 'Lopez'
+
+
+def test_safe_game_log_parser_helper_exists():
+    from mlb_api import get_player_game_log
+    assert callable(get_player_game_log)

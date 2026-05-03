@@ -11,13 +11,24 @@ import pandas as pd
 from config import CONFIG
 
 
-def build_filters(df: pd.DataFrame) -> dict:
-    st.sidebar.title("🏟️ A1PICKS Filters")
-    st.sidebar.markdown("---")
+def build_filters(df: pd.DataFrame, container=None, key_prefix: str = "sidebar", show_title: bool = True) -> dict:
+    """
+    Build the predictor filter controls in any Streamlit container.
+
+    This used to be sidebar-only.  The app now renders these controls in the
+    main page so mobile users are not forced to open Streamlit's sidebar.
+    The same function still supports st.sidebar for future desktop-only uses.
+    """
+    ui = container or st.sidebar
+
+    if show_title:
+        ui.markdown("### 🏟️ A1PICKS Filters")
+        ui.markdown("---")
+
     filters = {}
 
     # ── Target ────────────────────────────────────────────────────────────────
-    st.sidebar.markdown("### 🎯 Betting Target")
+    ui.markdown("#### 🎯 Betting Target")
     target_map = {
         "🎯 Hit Score — Any Base Hit":          "hit",
         "1️⃣ Single Score — Single Only":       "single",
@@ -25,44 +36,66 @@ def build_filters(df: pd.DataFrame) -> dict:
         "💣 HR Score — Home Run":               "hr",
         "🔴 H+R+RBI Score — Hits+Runs+RBIs":   "hrr",
     }
-    label            = st.sidebar.selectbox("Choose Your Betting Target", list(target_map.keys()))
-    filters['target']= target_map[label]
-    score_col_map    = {'hit':'Hit_Score','single':'Single_Score',
-                        'xb':'XB_Score','hr':'HR_Score','hrr':'HRR_Score'}
+    label = ui.selectbox(
+        "Choose Your Betting Target",
+        list(target_map.keys()),
+        key=f"{key_prefix}_target",
+    )
+    filters['target'] = target_map[label]
+    score_col_map = {'hit':'Hit_Score','single':'Single_Score',
+                     'xb':'XB_Score','hr':'HR_Score','hrr':'HRR_Score'}
     filters['score_col']      = score_col_map[filters['target']]
     filters['score_col_base'] = filters['score_col']
 
     # ── Park / GC toggles ─────────────────────────────────────────────────────
-    st.sidebar.markdown("### 🏟️ Park Adjustment")
-    filters['use_park'] = st.sidebar.toggle(
-        "Include Park Factors", value=True,
-        help="ON = blends park-adjusted + base probabilities.\nOFF = pure player vs pitcher."
-    )
-    st.sidebar.markdown("### 🌦️ Game Conditions")
-    filters['use_gc'] = st.sidebar.toggle(
-        "🌦️ Game Conditions (Full Weight)", value=True,
-        help="ON → Full game-environment ceiling (±40% Hit/XB, ±35% HR).\nOFF → 30% of full weight."
-    )
+    c1, c2 = ui.columns(2)
+    with c1:
+        st.markdown("#### 🏟️ Park")
+        filters['use_park'] = st.toggle(
+            "Include Park Factors", value=True,
+            key=f"{key_prefix}_use_park",
+            help="ON = blends park-adjusted + base probabilities.\nOFF = pure player vs pitcher."
+        )
+    with c2:
+        st.markdown("#### 🌦️ Conditions")
+        filters['use_gc'] = st.toggle(
+            "Game Conditions", value=True,
+            key=f"{key_prefix}_use_gc",
+            help="ON → Full game-environment ceiling (±40% Hit/XB, ±35% HR).\nOFF → 30% of full weight."
+        )
     if filters['use_gc']:
-        st.sidebar.markdown(
+        ui.markdown(
             '<small style="color:#64748b">Cond Δ column shows per-player impact</small>',
             unsafe_allow_html=True
         )
 
     # ── Lineup filters ────────────────────────────────────────────────────────
-    st.sidebar.markdown("### 📋 Lineup")
-    filters['starters_only'] = st.sidebar.checkbox("Starters only", value=False)
-    filters['confirmed_only'] = st.sidebar.toggle(
-        "✅ Confirmed lineups only",
-        value=False,
-        help="ON = hide players not yet in a confirmed batting order.\n"
-             "Lineups typically confirm 60-90 min before first pitch."
-    )
+    ui.markdown("#### 📋 Lineup")
+    l1, l2 = ui.columns(2)
+    with l1:
+        filters['starters_only'] = st.checkbox(
+            "Starters only", value=False, key=f"{key_prefix}_starters_only"
+        )
+    with l2:
+        filters['confirmed_only'] = st.toggle(
+            "✅ Confirmed lineups only",
+            value=False,
+            key=f"{key_prefix}_confirmed_only",
+            help="ON = hide players not yet in a confirmed batting order.\n"
+                 "Lineups typically confirm 60-90 min before first pitch."
+        )
 
     # ── Stat filters ──────────────────────────────────────────────────────────
-    st.sidebar.markdown("### 📊 Stat Filters")
-    filters['max_k']  = st.sidebar.slider("Max K Prob %",  10.0, 50.0, 35.0, 0.5)
-    filters['max_bb'] = st.sidebar.slider("Max BB Prob %",  2.0, 20.0, 15.0, 0.5)
+    ui.markdown("#### 📊 Stat Filters")
+    s1, s2 = ui.columns(2)
+    with s1:
+        filters['max_k'] = st.slider(
+            "Max K Prob %", 10.0, 50.0, 35.0, 0.5, key=f"{key_prefix}_max_k"
+        )
+    with s2:
+        filters['max_bb'] = st.slider(
+            "Max BB Prob %", 2.0, 20.0, 15.0, 0.5, key=f"{key_prefix}_max_bb"
+        )
 
     min_cfg = {
         'hit':   ("Min Hit Prob % (1B+XB+HR)", "total_hit_prob", 0.0, 50.0, 20.0),
@@ -72,35 +105,53 @@ def build_filters(df: pd.DataFrame) -> dict:
         'hrr':   ("Min Hit Prob % (H+R+RBI)",  "total_hit_prob", 0.0, 50.0, 15.0),
     }
     pl, pc, mn, mx, dv = min_cfg[filters['target']]
-    filters['min_prob']     = st.sidebar.slider(pl, mn, mx, dv, 0.5)
-    filters['min_prob_col'] = pc
-    filters['min_vs']       = st.sidebar.slider("Min vs Grade", -10, 10, -10, 1)
+    s3, s4 = ui.columns(2)
+    with s3:
+        filters['min_prob'] = st.slider(pl, mn, mx, dv, 0.5, key=f"{key_prefix}_min_prob")
+        filters['min_prob_col'] = pc
+    with s4:
+        filters['min_vs'] = st.slider("Min vs Grade", -10, 10, -10, 1, key=f"{key_prefix}_min_vs")
 
     # ── Team filters ──────────────────────────────────────────────────────────
-    st.sidebar.markdown("### 🏟️ Team Filters")
-    all_teams = sorted(df['Team'].unique().tolist()) if df is not None else []
-    filters['include_teams'] = st.sidebar.multiselect("Include Only Teams", options=all_teams)
-    filters['exclude_teams'] = st.sidebar.multiselect("Exclude Teams",       options=all_teams)
+    ui.markdown("#### 🏟️ Team Filters")
+    all_teams = sorted(df['Team'].dropna().unique().tolist()) if df is not None and 'Team' in df.columns else []
+    t1, t2 = ui.columns(2)
+    with t1:
+        filters['include_teams'] = st.multiselect(
+            "Include Only Teams", options=all_teams, key=f"{key_prefix}_include_teams"
+        )
+    with t2:
+        filters['exclude_teams'] = st.multiselect(
+            "Exclude Teams", options=all_teams, key=f"{key_prefix}_exclude_teams"
+        )
 
     # ── Player exclusions ─────────────────────────────────────────────────────
-    st.sidebar.markdown("### 🚫 Lineup Status")
+    ui.markdown("#### 🚫 Player Exclusions")
     if 'excluded_players' not in st.session_state:
         st.session_state.excluded_players = []
-    all_players = sorted(df['Batter'].unique().tolist()) if df is not None else []
-    excl = st.sidebar.multiselect(
+    all_players = sorted(df['Batter'].dropna().unique().tolist()) if df is not None and 'Batter' in df.columns else []
+    default_exclusions = [p for p in st.session_state.excluded_players if p in all_players]
+    excl = ui.multiselect(
         "Players NOT Playing Today",
         options=all_players,
-        default=st.session_state.excluded_players,
-        key="lineup_exclusions",
+        default=default_exclusions,
+        key=f"{key_prefix}_lineup_exclusions",
     )
     st.session_state.excluded_players = excl
     filters['excluded_players'] = excl
-    if st.sidebar.button("🔄 Clear All Exclusions"):
+    def _clear_exclusions(widget_key: str):
         st.session_state.excluded_players = []
-        st.rerun()
+        st.session_state[widget_key] = []
+
+    ui.button(
+        "🔄 Clear All Exclusions",
+        key=f"{key_prefix}_clear_exclusions",
+        on_click=_clear_exclusions,
+        args=(f"{key_prefix}_lineup_exclusions",),
+    )
 
     # ── Display ───────────────────────────────────────────────────────────────
-    st.sidebar.markdown("### 🔢 Display")
+    ui.markdown("#### 🔢 Display")
     sort_options = {
         "Score (High→Low)":      (filters['score_col'], False),
         "Hit Prob % (High→Low)": ("total_hit_prob",    False),
@@ -112,13 +163,32 @@ def build_filters(df: pd.DataFrame) -> dict:
         "vs Grade (High→Low)":   ("vs Grade",          False),
         "Pitcher Grade (A+→D)":  ("pitch_grade",       True),
     }
-    filters['sort_label']  = st.sidebar.selectbox("Sort By", list(sort_options.keys()))
+    d1, d2, d3 = ui.columns(3)
+    with d1:
+        filters['sort_label'] = st.selectbox(
+            "Sort By", list(sort_options.keys()), key=f"{key_prefix}_sort_label"
+        )
     filters['sort_col'], filters['sort_asc'] = sort_options[filters['sort_label']]
-    filters['result_count']  = st.sidebar.selectbox("Show Top N", [5,10,15,20,25,30,"All"], index=2)
-    filters['best_per_team'] = st.sidebar.checkbox("🏟️ Best player per team only", value=False)
+    with d2:
+        filters['result_count'] = st.selectbox(
+            "Show Top N", [5,10,15,20,25,30,"All"], index=2, key=f"{key_prefix}_result_count"
+        )
+    with d3:
+        filters['best_per_team'] = st.checkbox(
+            "🏟️ Best per team", value=False, key=f"{key_prefix}_best_per_team"
+        )
 
     return filters
 
+
+def build_predictor_control_panel(df: pd.DataFrame) -> dict:
+    """Primary predictor controls shown in the main page for mobile usability."""
+    st.markdown(
+        '<div class="mobile-control-intro">📱 <b>Controls & Filters</b> — primary controls are here so the app is usable on phones without opening the Streamlit sidebar.</div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("⚙️ Open / close predictor controls", expanded=True):
+        return build_filters(df, container=st, key_prefix="main_filters", show_title=False)
 
 def render_lineup_status_sidebar():
     try:

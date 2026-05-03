@@ -22,7 +22,7 @@ st.set_page_config(
 )
 
 from styles import inject_css
-from sidebar import (build_filters, apply_filters, get_slate_df,
+from sidebar import (build_predictor_control_panel, apply_filters, get_slate_df,
                      render_lineup_status_sidebar)
 from renders import (render_header, render_stat_bar, render_score_summary_cards,
                      render_pitcher_landscape, render_park_notice,
@@ -293,7 +293,7 @@ def main_page():
             st.error("❌ Could not load Matchups data.")
             return
 
-        filters = build_filters(raw_df)
+        filters = build_predictor_control_panel(raw_df)
 
         # Fetch signal data (batting order, form, handedness)
         order_map, form_map, handedness_map, signal_status = _fetch_signal_data()
@@ -422,13 +422,56 @@ def main_page():
 # NAVIGATION
 # ─────────────────────────────────────────────────────────────────────────────
 
+PAGES = [
+    "⚾ Predictor",
+    "👤 Player Profile",
+    "🔻 Under Targets",
+    "⚡ Parlay Builder",
+    "📚 Reference Manual",
+]
+
+
+def _set_page_from_top():
+    st.session_state['page'] = st.session_state.get('page_top', PAGES[0])
+
+
+def _set_page_from_sidebar():
+    st.session_state['page'] = st.session_state.get('page_sidebar', PAGES[0])
+
+
+def _sync_nav_state():
+    if st.session_state.get('page') not in PAGES:
+        st.session_state['page'] = PAGES[0]
+    page = st.session_state['page']
+    if st.session_state.get('page_top') != page:
+        st.session_state['page_top'] = page
+    if st.session_state.get('page_sidebar') != page:
+        st.session_state['page_sidebar'] = page
+
+
+def _render_top_navigation():
+    """Main-page navigation so mobile users do not depend on the sidebar."""
+    _sync_nav_state()
+    st.markdown('<div class="mobile-nav-label">📱 App Navigation</div>', unsafe_allow_html=True)
+    st.selectbox(
+        "Go to",
+        PAGES,
+        key="page_top",
+        on_change=_set_page_from_top,
+        label_visibility="collapsed",
+    )
+
+
 def main():
     # Auto-invalidation runs on every page load
     if should_auto_invalidate():
         st.rerun()
 
+    _render_top_navigation()
+
     st.sidebar.markdown("---")
-    if st.sidebar.checkbox("🎵 Music"):
+    st.sidebar.caption("Navigation and full predictor filters are also available in the main page for mobile use.")
+    if st.sidebar.checkbox("🎵 Music", key="music_sidebar"):
         audio_url = (
             "https://github.com/a1faded/a1picks-hits-bot/raw/refs/heads/main/"
             "Take%20Me%20Out%20to%20the%20Ballgame%20-%20Nancy%20Bea%20-%20Dodger%20Stadium%20Organ.mp3"
@@ -439,11 +482,14 @@ def main():
             height=55,
         )
 
-    page = st.sidebar.radio(
+    _sync_nav_state()
+    st.sidebar.radio(
         "Navigate",
-        ["⚾ Predictor","👤 Player Profile","🔻 Under Targets","⚡ Parlay Builder","📚 Reference Manual"],
-        index=0,
+        PAGES,
+        key="page_sidebar",
+        on_change=_set_page_from_sidebar,
     )
+    page = st.session_state.get('page', PAGES[0])
 
     raw_df     = load_matchups()
     pitcher_df = load_pitcher_data()

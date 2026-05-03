@@ -890,5 +890,41 @@ h4 { font-size: .85rem !important; font-weight: 600 !important; }
     height: 2.8rem !important;
   }
 }
+
+/* ── MAIN-PAGE MOBILE NAV + CONTROLS ────────────────────────────────────── */
+.mobile-nav-label {
+  color: var(--text2);
+  font-size: .74rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  margin: .15rem 0 .35rem;
+}
+.mobile-control-intro {
+  background: linear-gradient(135deg, var(--surf2), var(--surf));
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  padding: .7rem .9rem;
+  margin: .45rem 0 .55rem;
+  color: var(--text2);
+  font-size: .84rem;
+  box-shadow: var(--shadow-xs);
+}
+
+@media (max-width: 768px) {
+  .mobile-nav-label { margin-top: .25rem; }
+  .mobile-control-intro {
+    font-size: .8rem;
+    padding: .65rem .75rem;
+  }
+  [data-testid="stSelectbox"],
+  [data-testid="stMultiSelect"],
+  [data-testid="stSlider"],
+  [data-testid="stCheckbox"],
+  [data-testid="stToggle"] {
+    margin-bottom: .35rem !important;
+  }
+}
+
 </style>
 """, unsafe_allow_html=True)

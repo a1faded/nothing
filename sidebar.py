@@ -130,29 +130,42 @@ def build_filters(df: pd.DataFrame, container=None, key_prefix: str = "sidebar",
     ui.markdown("#### 🚫 Player Exclusions")
     if 'excluded_players' not in st.session_state:
         st.session_state.excluded_players = []
+
+    # Streamlit does not allow assigning to a widget's session_state key after
+    # that widget has been instantiated in the same rerun.  Use a reset nonce so
+    # the clear button can force a fresh multiselect instead of mutating the
+    # existing widget key directly.
+    nonce_key = f"{key_prefix}_lineup_exclusions_nonce"
+    if nonce_key not in st.session_state:
+        st.session_state[nonce_key] = 0
+
     all_players = sorted(df['Batter'].dropna().unique().tolist()) if df is not None and 'Batter' in df.columns else []
     default_exclusions = [p for p in st.session_state.excluded_players if p in all_players]
+    exclusion_widget_key = f"{key_prefix}_lineup_exclusions_{st.session_state[nonce_key]}"
     excl = ui.multiselect(
         "Players NOT Playing Today",
         options=all_players,
         default=default_exclusions,
-        key=f"{key_prefix}_lineup_exclusions",
+        key=exclusion_widget_key,
     )
     st.session_state.excluded_players = excl
     filters['excluded_players'] = excl
-    def _clear_exclusions(widget_key: str):
+
+    def _clear_exclusions(prefix: str):
         st.session_state.excluded_players = []
-        st.session_state[widget_key] = []
+        st.session_state[f"{prefix}_lineup_exclusions_nonce"] = (
+            st.session_state.get(f"{prefix}_lineup_exclusions_nonce", 0) + 1
+        )
 
     if allow_clear_button:
         ui.button(
             "🔄 Clear All Exclusions",
             key=f"{key_prefix}_clear_exclusions",
             on_click=_clear_exclusions,
-            args=(f"{key_prefix}_lineup_exclusions",),
+            args=(key_prefix,),
         )
     else:
-        ui.caption("Exclusion changes apply when you click Apply Filters below.")
+        ui.caption("Use the Clear exclusions button below to reset this list.")
 
     # ── Display ───────────────────────────────────────────────────────────────
     ui.markdown("#### 🔢 Display")
@@ -211,7 +224,9 @@ def build_predictor_control_panel(df: pd.DataFrame) -> dict:
         with c1:
             if st.button("🔄 Clear exclusions", key="main_filters_clear_exclusions_outside", width="stretch"):
                 st.session_state.excluded_players = []
-                st.session_state["main_filters_lineup_exclusions"] = []
+                st.session_state["main_filters_lineup_exclusions_nonce"] = (
+                    st.session_state.get("main_filters_lineup_exclusions_nonce", 0) + 1
+                )
                 st.rerun()
         with c2:
             st.caption("Because the enriched slate is cached, normal filter changes should only re-filter and re-render instead of repulling every API.")

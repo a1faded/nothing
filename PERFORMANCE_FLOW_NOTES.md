@@ -28,3 +28,6 @@ After deploying to Streamlit Cloud, use the app's **Refresh Live Data** button o
 
 ## Hotfix: Immediate Filters
 The first performance-flow build used an Apply Filters form. That reduced reruns but made filter changes appear unresponsive. This build removes the form and lets filter widgets update immediately while keeping the expensive enriched slate cached behind explicit Refresh Live Data controls.
+
+## Hotfix: Clear exclusions widget state
+Streamlit does not allow assigning to a widget's `st.session_state` key after that widget has already been instantiated during the same rerun. The Clear exclusions button now resets the exclusions through a nonce-based widget key refresh instead of directly writing to `main_filters_lineup_exclusions`.
